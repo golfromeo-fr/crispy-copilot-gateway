@@ -103,6 +103,80 @@ def test_fallback_code_constant():
     assert adapt.FALLBACK_CODE == "no_available_model_endpoints"
 
 
+def _messages_body() -> dict:
+    return {
+        "model": "gpt-6-luna", "max_tokens": 64, "stream": True,
+        "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": "no fluff"}],
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/png", "data": "ABCD"}}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "sure"},
+                {"type": "tool_use", "id": "tu_1", "name": "f", "input": {"a": 1}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "result"}]},
+        ],
+        "tools": [{"name": "f", "description": "d", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "tool", "name": "f"},
+        "temperature": 0.5, "top_p": 0.9,
+        "stop_sequences": ["END"], "top_k": 3, "metadata": {"x": 1},
+    }
+
+
+def test_messages_to_responses_body_translation():
+    out = adapt.messages_to_responses_body(_messages_body())
+    assert out["model"] == "gpt-6-luna" and out["stream"] is True
+    assert out["instructions"] == "be brief\n\nno fluff"
+    assert out["input"][0] == {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    assert out["input"][1]["content"] == [{"type": "input_text", "text": "look"},
+        {"type": "input_image", "image_url": "data:image/png;base64,ABCD"}]
+    assert out["input"][2] == {"role": "assistant",
+                               "content": [{"type": "output_text", "text": "sure"}]}
+    assert out["input"][3] == {"type": "function_call", "call_id": "tu_1",
+                               "name": "f", "arguments": '{"a": 1}'}
+    assert out["input"][4] == {"type": "function_call_output", "call_id": "tu_1", "output": "result"}
+    assert out["max_output_tokens"] == 64
+    assert out["tools"] == [{"type": "function", "name": "f", "description": "d",
+                             "parameters": {"type": "object"}}]
+    assert out["tool_choice"] == {"type": "function", "name": "f"}
+    assert out["temperature"] == 0.5 and out["top_p"] == 0.9
+    for dropped in ("stop_sequences", "top_k", "metadata"):
+        assert dropped not in out
+
+
+def test_messages_tool_choice_variants():
+    assert adapt.messages_to_responses_body({"messages": [], "tool_choice": "any"})["tool_choice"] == "required"
+    assert adapt.messages_to_responses_body({"messages": [], "tool_choice": "auto"})["tool_choice"] == "auto"
+    out = adapt.messages_to_responses_body({"messages": [], "system": "sys", "tool_choice": "none"})
+    assert out["tool_choice"] == "none" and out["instructions"] == "sys"
+
+
+def test_responses_to_messages_response_shape():
+    resp = {"id": "r1", "status": "completed", "output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "alpha"},
+                                         {"type": "output_text", "text": "beta"}]},
+        {"type": "function_call", "call_id": "c9", "name": "f", "arguments": '{"a": 1}'}],
+        "usage": {"input_tokens": 4, "output_tokens": 2},
+        "copilot_usage": {"total_nano_aiu": 555}}
+    out = adapt.responses_to_messages_response(resp, "gpt-6-luna")
+    assert out["type"] == "message" and out["role"] == "assistant" and out["model"] == "gpt-6-luna"
+    assert out["content"][0] == {"type": "text", "text": "alpha\nbeta"}
+    assert out["content"][1] == {"type": "tool_use", "id": "c9", "name": "f", "input": {"a": 1}}
+    assert out["stop_reason"] == "tool_use" and out["stop_sequence"] is None
+    assert out["usage"] == {"input_tokens": 4, "output_tokens": 2}
+    assert out["copilot_usage"] == {"total_nano_aiu": 555}
+
+
+def test_messages_stop_reason_max_tokens_and_end_turn():
+    out = adapt.responses_to_messages_response({"status": "incomplete", "output": [], "usage": {}}, "m")
+    assert out["stop_reason"] == "max_tokens" and out["content"] == []
+    out = adapt.responses_to_messages_response({"status": "completed", "output": [], "usage": {}}, "m")
+    assert out["stop_reason"] == "end_turn"
+
+
 def test_sse_to_chat_translation(monkeypatch):
     recorded = []
     monkeypatch.setattr(usage, "record", lambda *a: recorded.append(a))

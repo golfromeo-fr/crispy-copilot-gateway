@@ -156,3 +156,126 @@ def responses_to_chat_response(resp: dict, model: str) -> dict:
     if resp.get("copilot_usage"):
         out["copilot_usage"] = resp["copilot_usage"]
     return out
+
+
+def messages_to_responses_body(body: dict) -> dict:
+    """Translate an Anthropic /v1/messages body into a Responses API body."""
+    out: dict = {"model": body.get("model")}
+    if "stream" in body:
+        out["stream"] = body["stream"]
+    system = body.get("system")
+    if isinstance(system, str):
+        instructions = [system] if system else []
+    elif isinstance(system, list):
+        instructions = [b.get("text", "") for b in system
+                        if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        instructions = []
+    if instructions:
+        out["instructions"] = "\n\n".join(instructions)
+    input_items: list[dict] = []
+    for m in body.get("messages") or []:
+        role = m.get("role")
+        if role == "user":
+            pending: list[dict] = []
+            for block in _anthropic_blocks(m.get("content")):
+                if block.get("type") == "text":
+                    pending.append({"type": "input_text", "text": block.get("text", "")})
+                elif block.get("type") == "image":
+                    src = block.get("source") or {}
+                    pending.append({"type": "input_image", "image_url":
+                                    f"data:{src.get('media_type', 'application/octet-stream')};"
+                                    f"base64,{src.get('data', '')}"})
+                elif block.get("type") == "tool_result":
+                    if pending:
+                        input_items.append({"role": "user", "content": pending})
+                        pending = []
+                    input_items.append({"type": "function_call_output",
+                                        "call_id": block.get("tool_use_id"),
+                                        "output": _text_of(block.get("content"))})
+            if pending:
+                input_items.append({"role": "user", "content": pending})
+        elif role == "assistant":
+            texts: list[str] = []
+            for block in _anthropic_blocks(m.get("content")):
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "tool_use":
+                    if texts:
+                        input_items.append({"role": "assistant",
+                                            "content": [{"type": "output_text", "text": "\n".join(texts)}]})
+                        texts = []
+                    inp = block.get("input")
+                    input_items.append({"type": "function_call", "call_id": block.get("id"),
+                                        "name": block.get("name"),
+                                        "arguments": json.dumps(inp) if isinstance(inp, dict) else str(inp)})
+            if texts:
+                input_items.append({"role": "assistant",
+                                    "content": [{"type": "output_text", "text": "\n".join(texts)}]})
+    out["input"] = input_items
+    if body.get("max_tokens") is not None:
+        out["max_output_tokens"] = body["max_tokens"]
+    for k in ("temperature", "top_p"):
+        if k in body:
+            out[k] = body[k]
+    tools = []
+    for t in body.get("tools") or []:
+        if not isinstance(t, dict) or not t.get("name"):
+            continue
+        item = {"type": "function", "name": t["name"]}
+        if t.get("description"):
+            item["description"] = t["description"]
+        if t.get("input_schema"):
+            item["parameters"] = t["input_schema"]
+        tools.append(item)
+    if tools:
+        out["tools"] = tools
+    choice = body.get("tool_choice")
+    if isinstance(choice, str):
+        out["tool_choice"] = "required" if choice == "any" else choice
+    elif isinstance(choice, dict) and choice.get("type") == "tool" and choice.get("name"):
+        out["tool_choice"] = {"type": "function", "name": choice["name"]}
+    # stop_sequences / top_k / metadata have no Responses equivalent and are dropped.
+    return out
+
+
+def _anthropic_blocks(content) -> list[dict]:
+    """Anthropic content as a block list; a bare string is one text block."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def responses_to_messages_response(resp: dict, model: str) -> dict:
+    """Re-encode a Responses API payload as an Anthropic message."""
+    texts: list[str] = []
+    content: list[dict] = []
+    for item in resp.get("output") or []:
+        if item.get("type") == "message":
+            texts += [p.get("text", "") for p in item.get("content") or []
+                      if isinstance(p, dict) and p.get("type") == "output_text"]
+        elif item.get("type") == "function_call":
+            args = item.get("arguments")
+            if isinstance(args, str):
+                try:
+                    inp = json.loads(args)
+                except Exception:
+                    inp = {}
+            elif isinstance(args, dict):
+                inp = args
+            else:
+                inp = {}
+            content.append({"type": "tool_use", "id": item.get("call_id"),
+                            "name": item.get("name"),
+                            "input": inp if isinstance(inp, dict) else {}})
+    if texts:
+        content.insert(0, {"type": "text", "text": "\n".join(texts)})
+    stop = "tool_use" if any(b["type"] == "tool_use" for b in content) \
+        else ("max_tokens" if resp.get("status") == "incomplete" else "end_turn")
+    u = resp.get("usage") or {}
+    out = {"id": resp.get("id"), "type": "message", "role": "assistant", "model": model,
+           "content": content, "stop_reason": stop, "stop_sequence": None,
+           "usage": {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens")}}
+    if resp.get("copilot_usage"):
+        out["copilot_usage"] = resp["copilot_usage"]
+    return out

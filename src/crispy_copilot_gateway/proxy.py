@@ -183,6 +183,61 @@ async def _forward_adapted(request: Request, method: str, key_name: str | None,
         return Response(content=content, status_code=resp.status_code, media_type=media_type)
 
 
+async def _forward_messages(request: Request) -> Response:
+    """Route /v1/messages: native passthrough, or adapt to /responses when advertised.
+
+    The endpoint cache refreshes when stale (a fresh server process must decide
+    correctly on its first request). A chat-only model passes through natively
+    so Copilot's 400 surfaces honestly - no adapter exists for that direction.
+    """
+    body = await request.body()
+    model = _model_of(body)
+    key_name = getattr(request.state, "proxy_key", None)
+    await adapt._ensure_cache()
+    eps = adapt.model_endpoints(model)
+    if eps is None or "/v1/messages" in eps:
+        return await _forward(request, "POST", "/v1/messages")
+    if "/responses" in eps:
+        return await _forward_messages_adapted(request, key_name, model, _stream_of(body))
+    return await _forward(request, "POST", "/v1/messages")
+
+
+async def _forward_messages_adapted(request: Request, key_name: str | None,
+                                    model: str | None, stream_requested: bool) -> Response:
+    """Translate the ORIGINAL Anthropic body, forward to /responses, re-encode the reply."""
+    conn = connections.active_connection()
+    if conn is None:
+        raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
+    base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
+    body = await request.body()  # cached by Starlette; re-reading is safe
+    chat = json.loads(body)
+    chat["stream"] = bool(stream_requested)  # original stream flag, honored exactly
+    body_out = json.dumps(adapt.messages_to_responses_body(chat)).encode()
+    headers = copilot.upstream_headers(conn["github_token"], vision=copilot.has_vision(body))
+    for key, value in request.headers.items():
+        if key.lower() not in _DROP_HEADERS:
+            headers.setdefault(key, value)
+    headers["Content-Type"] = request.headers.get("content-type", "application/json")
+    req = upstream.build_request("POST", base + "/responses", content=body_out, headers=headers)
+    resp = await upstream.send(req, stream=True)
+    fwd = _forward_headers(resp)
+    media_type = resp.headers.get("content-type")
+    if "text/event-stream" in (media_type or ""):
+        return StreamingResponse(
+            adapt_stream.sse_to_messages(resp.aiter_raw(), key_name=key_name, model=model),
+            status_code=resp.status_code, media_type=media_type, headers=fwd,
+            background=BackgroundTask(resp.aclose))
+    content = await resp.aread()
+    await resp.aclose()
+    try:
+        payload = json.loads(content)
+        _record(key_name, model, usage.parse_usage(payload))
+        return JSONResponse(adapt.responses_to_messages_response(payload, model or ""),
+                            status_code=resp.status_code, headers=fwd)
+    except Exception:
+        return Response(content=content, status_code=resp.status_code, media_type=media_type)
+
+
 def build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -228,7 +283,7 @@ def build_app() -> FastAPI:
 
     @app.post("/v1/messages")
     async def messages_route(request: Request) -> Response:
-        return await _forward(request, "POST", "/v1/messages")
+        return await _forward_messages(request)
 
     @app.post("/v1/messages/count_tokens")
     async def count_tokens_route(request: Request) -> Response:

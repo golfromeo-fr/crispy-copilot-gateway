@@ -51,6 +51,8 @@ def _make_client(monkeypatch, *, connected=True):
                 rbody = {}
             if rbody.get("stream"):
                 async def rsse():
+                    yield (b'data: {"type":"response.created","response":{"id":"r9",'
+                           b'"model":"gpt-6-luna","usage":{"input_tokens":7}}}\n\n')
                     yield (b'data: {"type":"response.output_item.added",'
                            b'"item":{"type":"message","role":"assistant"}}\n\n')
                     yield b'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
@@ -59,12 +61,19 @@ def _make_client(monkeypatch, *, connected=True):
                            b'"copilot_usage":{"total_nano_aiu":4473525000}}}\n\n')
                 return httpx.Response(200, content=rsse(),
                                       headers={"content-type": "text/event-stream"})
-            return httpx.Response(200, json={"id": "r9", "status": "completed", "output": [
-                {"type": "message", "content": [{"type": "output_text", "text": "Hello"}]},
-                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"}],
+            output = [{"type": "message", "content": [{"type": "output_text", "text": "Hello"}]}]
+            if rbody.get("tools"):
+                output.append({"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"})
+            return httpx.Response(200, json={"id": "r9", "status": "completed", "output": output,
                 "usage": {"input_tokens": 7, "output_tokens": 3},
                 "copilot_usage": {"total_nano_aiu": 4473525000}})
         if request.url.path == "/v1/messages":
+            try:
+                mbody = json.loads(request.content or b"{}")
+            except Exception:
+                mbody = {}
+            if mbody.get("model") == "gemini-4-carbon":
+                return httpx.Response(400, json={"error": {"code": "no_available_model_endpoints"}})
             return httpx.Response(200, json={"content": [{"type": "text", "text": "hi"}]})
         return httpx.Response(404)
 
@@ -188,6 +197,7 @@ def test_adapted_responses_non_stream_reencoded(monkeypatch):
     adapt.set_cache({"gpt-6-luna": ["/responses"]})
     resp = client.post("/v1/chat/completions", headers=_auth(),
                        json={"model": "gpt-6-luna",
+                             "tools": [{"type": "function", "function": {"name": "f"}}],
                              "messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 200
     data = resp.json()
@@ -205,6 +215,7 @@ def test_chat_400_fallback_retries_via_responses(monkeypatch, arm_fallback):
     adapt.set_cache({"mai-code-2-flash": ["/chat/completions", "/responses"]})
     resp = client.post("/v1/chat/completions", headers=_auth(),
                        json={"model": "mai-code-2-flash",
+                             "tools": [{"type": "function", "function": {"name": "f"}}],
                              "messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 200
     data = resp.json()
@@ -241,3 +252,57 @@ def test_chat_400_passthrough_without_responses_advertised(monkeypatch, arm_fall
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "no_available_model_endpoints"
     assert [c.url.path for c in calls] == ["/chat/completions"]  # no retry
+
+
+def test_messages_adapted_to_responses_non_stream(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"gpt-6-luna": ["/responses"]})
+    resp = client.post("/v1/messages", headers=_auth(),
+                       json={"model": "gpt-6-luna", "max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["type"] == "message" and data["role"] == "assistant"
+    assert data["content"][0]["type"] == "text" and data["content"][0]["text"] == "Hello"
+    assert data["stop_reason"] == "end_turn"
+    assert data["usage"]["input_tokens"] > 0
+    assert calls[-1].url.path == "/responses"
+
+
+def test_messages_adapted_to_responses_stream(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"gpt-6-luna": ["/responses"]})
+    resp = client.post("/v1/messages", headers=_auth(),
+                       json={"model": "gpt-6-luna", "stream": True, "max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert b"event: message_start" in resp.content
+    assert b"event: content_block_delta" in resp.content
+    assert b"event: message_delta" in resp.content and b'"stop_reason":"end_turn"' in resp.content
+    assert b"event: message_stop" in resp.content
+    assert b"data: [DONE]" not in resp.content  # Anthropic protocol has no DONE sentinel
+    assert calls[-1].url.path == "/responses"
+
+
+def test_messages_native_when_advertised(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"claude-haiku-5.5": ["/chat/completions", "/v1/messages"]})
+    resp = client.post("/v1/messages", headers={**_auth(), "anthropic-version": "2023-06-01"},
+                       json={"model": "claude-haiku-5.5", "max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    sent = calls[-1]
+    assert sent.url.path == "/v1/messages"  # native upstream passthrough
+    assert json.loads(sent.content)["model"] == "claude-haiku-5.5"
+
+
+def test_messages_native_passthrough_for_chat_only_model(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"gemini-4-carbon": ["/chat/completions"]})
+    resp = client.post("/v1/messages", headers=_auth(),
+                       json={"model": "gemini-4-carbon", "max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 400  # Copilot error surfaces honestly, no retry
+    assert resp.json()["error"]["code"] == "no_available_model_endpoints"
+    assert [c.url.path for c in calls] == ["/v1/messages"]
