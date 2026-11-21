@@ -52,6 +52,8 @@ def _render(rows, state, models: list[dict], error: str | None = None) -> None:
                         ui.label(name).classes("text-sm opacity-60")
                     if ((m.get("policy") or {}).get("state") or "enabled") != "enabled":
                         ui.badge("disabled", color="grey")
+                    eps = m.get("supported_endpoints") or []
+                    ui.label(", ".join(eps) if eps else "chat (default)").classes("text-xs opacity-50")
                     ui.button(icon="content_copy", on_click=lambda mid=mid: _copy(mid)).props("flat dense")
             ui.label("one id per line - paste into your harness provider config").classes("opacity-60")
     state["ids"] = ids
