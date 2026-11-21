@@ -74,6 +74,10 @@ async def _finish(resp, buf, key_name, model) -> None:
         await resp.aclose()
 
 
+_DROP_HEADERS = ("host", "content-length", "connection", "keep-alive", "transfer-encoding",
+                 "te", "upgrade", "authorization", "x-api-key")
+
+
 async def _forward(request: Request, method: str, path: str) -> Response:
     conn = connections.active_connection()
     if conn is None:
@@ -82,6 +86,11 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
     headers = copilot.upstream_headers(github_token, vision=copilot.has_vision(body))
+    # Preserve protocol headers the client sent (anthropic-version, OpenAI-Beta, ...);
+    # auth and hop-by-hop headers are dropped, Copilot's own are overlaid last.
+    for key, value in request.headers.items():
+        if key.lower() not in _DROP_HEADERS:
+            headers.setdefault(key, value)
     headers["Content-Type"] = request.headers.get("content-type", "application/json")
     # TODO (P4): per-key -> connection mapping; every key currently uses the first connection.
     # Absolute url overrides the client base_url, routing to this connection's endpoint.
@@ -155,7 +164,19 @@ def build_app() -> FastAPI:
     async def responses_route(request: Request) -> Response:
         return await _forward(request, "POST", "/responses")
 
-    # TODO (P2): /v1/messages (Anthropic) route on Copilot is TBD in live testing - not routed yet.
+    @app.post("/v1/messages")
+    async def messages_route(request: Request) -> Response:
+        return await _forward(request, "POST", "/v1/messages")
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens_route(request: Request) -> Response:
+        # Copilot has no count_tokens; Anthropic clients tolerate a rough estimate.
+        body = await request.body()
+        try:
+            size = len(json.dumps(json.loads(body).get("messages", [])))
+        except Exception:
+            size = len(body)
+        return JSONResponse({"input_tokens": max(1, size // 4)})
     from . import ui as gateway_ui
 
     gateway_ui.mount(app)

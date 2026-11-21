@@ -24,6 +24,8 @@ def _make_client(monkeypatch, *, connected=True):
                                   headers={"content-type": "text/event-stream"})
         if request.url.path == "/models":
             return httpx.Response(200, json={"data": [{"id": "gpt-5"}]})
+        if request.url.path == "/v1/messages":
+            return httpx.Response(200, json={"content": [{"type": "text", "text": "hi"}]})
         return httpx.Response(404)
 
     mock = httpx.AsyncClient(transport=httpx.MockTransport(handler),
@@ -103,3 +105,24 @@ def test_fetch_models_uses_active_connection_bearer(monkeypatch):
     sent = calls[-1]
     assert sent.method == "GET" and sent.url.path == "/models"
     assert sent.headers["Authorization"] == "Bearer gh-token"
+
+
+def test_anthropic_messages_forwarded(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    resp = client.post("/v1/messages", headers={**_auth(), "anthropic-version": "2023-06-01"},
+                       json={"model": "claude-opus-5.5", "max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    sent = calls[-1]
+    assert sent.url.path == "/v1/messages"
+    assert sent.headers["Authorization"] == "Bearer gh-token"
+    assert sent.headers.get("anthropic-version") == "2023-06-01"
+    assert "x-api-key" not in sent.headers
+
+
+def test_count_tokens_stub(monkeypatch):
+    client, _ = _make_client(monkeypatch)
+    resp = client.post("/v1/messages/count_tokens", headers=_auth(),
+                       json={"messages": [{"role": "user", "content": "hello world"}]})
+    assert resp.status_code == 200
+    assert resp.json()["input_tokens"] >= 1
