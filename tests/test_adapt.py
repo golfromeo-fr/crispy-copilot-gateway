@@ -92,6 +92,17 @@ def test_upstream_kind_from_injected_cache():
     assert asyncio.run(adapt.upstream_kind(None)) == "chat"
 
 
+def test_model_endpoints_cache_only():
+    adapt.set_cache({"mai-code-2-flash": ["/chat/completions", "/responses"]})
+    assert adapt.model_endpoints("mai-code-2-flash") == frozenset({"/chat/completions", "/responses"})
+    assert adapt.model_endpoints("unknown") is None
+    assert adapt.model_endpoints(None) is None
+
+
+def test_fallback_code_constant():
+    assert adapt.FALLBACK_CODE == "no_available_model_endpoints"
+
+
 def test_sse_to_chat_translation(monkeypatch):
     recorded = []
     monkeypatch.setattr(usage, "record", lambda *a: recorded.append(a))

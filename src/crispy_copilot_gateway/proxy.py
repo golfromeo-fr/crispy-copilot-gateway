@@ -39,6 +39,21 @@ def _model_of(body: bytes) -> str | None:
         return None
 
 
+def _stream_of(body: bytes) -> bool:
+    try:
+        return bool(json.loads(body).get("stream"))
+    except Exception:
+        return False
+
+
+def _is_fallback_error(content: bytes) -> bool:
+    """Copilot advertises /chat/completions but rejects it at request time."""
+    try:
+        return (json.loads(content).get("error") or {}).get("code") == adapt.FALLBACK_CODE
+    except Exception:
+        return False
+
+
 def _forward_headers(resp: httpx.Response) -> dict:
     # Forward only safe metadata; never content-length/transfer-encoding/connection.
     return {k: v for k, v in resp.headers.items()
@@ -86,13 +101,9 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
     model = _model_of(body)
-    upstream_path, body_out, adapted = path, body, False
+    key_name = getattr(request.state, "proxy_key", None)
     if path == "/chat/completions" and await adapt.upstream_kind(model) == "responses":
-        try:
-            body_out = json.dumps(adapt.chat_to_responses_body(json.loads(body))).encode()
-            upstream_path, adapted = "/responses", True
-        except Exception:
-            pass  # malformed chat body -> fail-open passthrough
+        return await _forward_adapted(request, method, key_name, model, _stream_of(body))
     headers = copilot.upstream_headers(github_token, vision=copilot.has_vision(body))
     # Preserve protocol headers the client sent (anthropic-version, OpenAI-Beta, ...);
     # auth and hop-by-hop headers are dropped, Copilot's own are overlaid last.
@@ -102,18 +113,11 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     headers["Content-Type"] = request.headers.get("content-type", "application/json")
     # TODO (P4): per-key -> connection mapping; every key currently uses the first connection.
     # Absolute url overrides the client base_url, routing to this connection's endpoint.
-    req = upstream.build_request(method, base + upstream_path, content=body_out, headers=headers)
+    req = upstream.build_request(method, base + path, content=body, headers=headers)
     resp = await upstream.send(req, stream=True)
     fwd = _forward_headers(resp)
     media_type = resp.headers.get("content-type")
-    key_name = getattr(request.state, "proxy_key", None)
     if "text/event-stream" in (media_type or ""):
-        if adapted:
-            # Translator consumes frames and meters usage itself; just close upstream after.
-            return StreamingResponse(
-                adapt_stream.sse_to_chat(resp.aiter_raw(), key_name=key_name, model=model),
-                status_code=resp.status_code, media_type=media_type, headers=fwd,
-                background=BackgroundTask(resp.aclose))
         buf = bytearray()
 
         async def tap():
@@ -127,19 +131,56 @@ async def _forward(request: Request, method: str, path: str) -> Response:
                                  background=BackgroundTask(_finish, resp, buf, key_name, model))
     content = await resp.aread()
     await resp.aclose()
-    if adapted:
-        try:
-            payload = json.loads(content)
-            _record(key_name, model, usage.parse_usage(payload))
-            chat = adapt.responses_to_chat_response(payload, model or "")
-        except Exception:
-            return Response(content=content, status_code=resp.status_code, media_type=media_type)
-        return JSONResponse(chat, status_code=resp.status_code, headers=fwd)
+    # Copilot sometimes advertises /chat/completions but rejects it at request time
+    # (live: mai-code-2-flash, code no_available_model_endpoints); retry once via /responses.
+    if (resp.status_code == 400 and path == "/chat/completions" and _is_fallback_error(content)
+            and "/responses" in (adapt.model_endpoints(model) or frozenset())):
+        return await _forward_adapted(request, method, key_name, model, _stream_of(body))
     try:
         _record(key_name, model, usage.parse_usage(json.loads(content)))
     except Exception:
         pass
     return Response(content=content, status_code=resp.status_code, media_type=media_type, headers=fwd)
+
+
+async def _forward_adapted(request: Request, method: str, key_name: str | None,
+                           model: str | None, stream_requested: bool) -> Response:
+    """Translate the ORIGINAL chat body, forward to /responses, re-encode the reply.
+
+    Never falls back again: a failure here surfaces to the client as-is.
+    """
+    conn = connections.active_connection()
+    if conn is None:
+        raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
+    base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
+    body = await request.body()  # cached by Starlette; re-reading is safe
+    chat = json.loads(body)
+    chat["stream"] = bool(stream_requested)  # original stream flag, honored exactly
+    body_out = json.dumps(adapt.chat_to_responses_body(chat)).encode()
+    headers = copilot.upstream_headers(conn["github_token"], vision=copilot.has_vision(body))
+    for key, value in request.headers.items():
+        if key.lower() not in _DROP_HEADERS:
+            headers.setdefault(key, value)
+    headers["Content-Type"] = request.headers.get("content-type", "application/json")
+    req = upstream.build_request(method, base + "/responses", content=body_out, headers=headers)
+    resp = await upstream.send(req, stream=True)
+    fwd = _forward_headers(resp)
+    media_type = resp.headers.get("content-type")
+    if "text/event-stream" in (media_type or ""):
+        # Translator consumes frames and meters usage itself; just close upstream after.
+        return StreamingResponse(
+            adapt_stream.sse_to_chat(resp.aiter_raw(), key_name=key_name, model=model),
+            status_code=resp.status_code, media_type=media_type, headers=fwd,
+            background=BackgroundTask(resp.aclose))
+    content = await resp.aread()
+    await resp.aclose()
+    try:
+        payload = json.loads(content)
+        _record(key_name, model, usage.parse_usage(payload))
+        return JSONResponse(adapt.responses_to_chat_response(payload, model or ""),
+                            status_code=resp.status_code, headers=fwd)
+    except Exception:
+        return Response(content=content, status_code=resp.status_code, media_type=media_type)
 
 
 def build_app() -> FastAPI:

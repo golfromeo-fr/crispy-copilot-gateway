@@ -5,6 +5,7 @@ import json
 import time
 
 MODELS_TTL = 600  # seconds before the supported_endpoints cache refreshes
+FALLBACK_CODE = "no_available_model_endpoints"  # Copilot rejects an advertised endpoint
 
 _cache: dict = {"endpoints": {}, "fetched_at": 0.0}  # model_id -> frozenset(endpoints)
 
@@ -15,21 +16,32 @@ def set_cache(endpoints: dict) -> None:
     _cache["fetched_at"] = time.time()
 
 
+async def _ensure_cache() -> None:
+    """Refresh the supported_endpoints cache when stale; failures fail open."""
+    if time.time() - _cache["fetched_at"] <= MODELS_TTL:
+        return
+    from . import proxy  # circular-import safety
+    try:
+        models = await proxy.fetch_models()
+        _cache["endpoints"] = {m.get("id"): frozenset(m.get("supported_endpoints") or [])
+                               for m in models if isinstance(m, dict)}
+    except Exception:
+        pass  # fail open; retry after TTL
+    _cache["fetched_at"] = time.time()
+
+
+def model_endpoints(model: str | None) -> frozenset | None:
+    """Cached endpoint set for the model WITHOUT refreshing; None when unknown."""
+    return _cache["endpoints"].get(model or "")
+
+
 async def upstream_kind(model: str | None) -> str:
     """'responses' only when the model lists /responses and not /chat/completions.
 
     Unknown models or fetch failures fail open to 'chat' (passthrough).
     """
-    if time.time() - _cache["fetched_at"] > MODELS_TTL:
-        from . import proxy  # circular-import safety
-        try:
-            models = await proxy.fetch_models()
-            _cache["endpoints"] = {m.get("id"): frozenset(m.get("supported_endpoints") or [])
-                                   for m in models if isinstance(m, dict)}
-            _cache["fetched_at"] = time.time()
-        except Exception:
-            _cache["fetched_at"] = time.time()  # fail open; retry after TTL
-    eps = _cache["endpoints"].get(model or "")
+    await _ensure_cache()
+    eps = model_endpoints(model)
     if eps is not None and "/responses" in eps and "/chat/completions" not in eps:
         return "responses"
     return "chat"

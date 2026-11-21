@@ -16,7 +16,7 @@ def mount(app) -> None:
         _mounted = True
     else:
         app.mount("/ui", core.app)  # re-mount the configured app for extra apps (tests)
-    # NOTE: socket.io connect gating is intentionally NOT done here — wrapping NiceGUI's
+    # NOTE: socket.io connect gating is intentionally NOT done here - wrapping NiceGUI's
     # connect handler silently breaks event delivery (clicks never reach handlers). The
     # HTTP middleware gates the page, statics, and polling; a direct websocket upgrade
     # remains a known gap, acceptable for a 127.0.0.1-bound tool.

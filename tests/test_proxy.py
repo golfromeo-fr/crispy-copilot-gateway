@@ -3,9 +3,19 @@ import asyncio
 import json
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from crispy_copilot_gateway import adapt, connections, keys, proxy, usage
+
+FALLBACK_ARMED = {"on": False}  # fallback tests arm it; handler then 400s mai-code-2-flash
+
+
+@pytest.fixture()
+def arm_fallback():
+    FALLBACK_ARMED["on"] = True
+    yield
+    FALLBACK_ARMED["on"] = False
 
 
 def _make_client(monkeypatch, *, connected=True):
@@ -14,6 +24,15 @@ def _make_client(monkeypatch, *, connected=True):
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.url.path == "/chat/completions":
+            try:
+                cbody = json.loads(request.content or b"{}")
+            except Exception:
+                cbody = {}
+            if FALLBACK_ARMED["on"] and cbody.get("model") == "mai-code-2-flash":
+                # Live evidence: advertised /chat/completions rejected at request time.
+                return httpx.Response(400, json={"error": {
+                    "message": "no model endpoints available given user constraints",
+                    "code": "no_available_model_endpoints"}})
             # MockTransport pre-consumes bytes under send(stream=True); an async
             # generator keeps the stream consumable for aiter_raw().
             async def sse():
@@ -179,3 +198,46 @@ def test_adapted_responses_non_stream_reencoded(monkeypatch):
     assert data["usage"]["prompt_tokens"] == 7 and data["usage"]["total_tokens"] == 10
     assert data["copilot_usage"]["total_nano_aiu"] == 4473525000
     assert calls[-1].url.path == "/responses"
+
+
+def test_chat_400_fallback_retries_via_responses(monkeypatch, arm_fallback):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"mai-code-2-flash": ["/chat/completions", "/responses"]})
+    resp = client.post("/v1/chat/completions", headers=_auth(),
+                       json={"model": "mai-code-2-flash",
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["object"] == "chat.completion"
+    assert data["choices"][0]["message"]["content"] == "Hello"
+    assert data["choices"][0]["finish_reason"] == "tool_calls"
+    assert data["usage"]["prompt_tokens"] == 7 and data["usage"]["total_tokens"] == 10
+    paths = [c.url.path for c in calls]
+    assert paths == ["/chat/completions", "/responses"]  # exactly one retry, no recursion
+
+
+def test_chat_400_fallback_streams_translated(monkeypatch, arm_fallback):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"mai-code-2-flash": ["/chat/completions", "/responses"]})
+    resp = client.post("/v1/chat/completions", headers=_auth(),
+                       json={"model": "mai-code-2-flash", "stream": True,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert b'"chat.completion.chunk"' in resp.content
+    assert b'"role":"assistant"' in resp.content
+    assert b'"content":"Hello"' in resp.content
+    assert b'"total_nano_aiu"' in resp.content
+    assert b"data: [DONE]\n\n" in resp.content
+    assert [c.url.path for c in calls] == ["/chat/completions", "/responses"]
+
+
+def test_chat_400_passthrough_without_responses_advertised(monkeypatch, arm_fallback):
+    client, calls = _make_client(monkeypatch)
+    adapt.set_cache({"mai-code-2-flash": ["/chat/completions"]})
+    resp = client.post("/v1/chat/completions", headers=_auth(),
+                       json={"model": "mai-code-2-flash",
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "no_available_model_endpoints"
+    assert [c.url.path for c in calls] == ["/chat/completions"]  # no retry
