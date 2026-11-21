@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 APP_NAME = "crispy-copilot-gateway"
@@ -23,6 +24,14 @@ def connections_path() -> Path:
 
 def keys_path() -> Path:
     return data_dir() / "api-keys.json"
+
+
+def storage_secret() -> str:
+    """Persistent NiceGUI storage secret: generated once, kept 0600 in the data dir."""
+    path = data_dir() / "storage_secret.txt"
+    if not path.exists():
+        write_private(path, secrets.token_urlsafe(32))
+    return path.read_text(encoding="utf-8").strip()
 
 
 def write_private(path: Path, text: str) -> None:

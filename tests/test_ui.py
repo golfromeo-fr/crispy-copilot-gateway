@@ -33,6 +33,14 @@ def test_ui_rejects_wrong_password():
     assert res.status_code == 401
 
 
+def test_ui_page_renders_header_and_cards():
+    raw = keys.create("ui-test")
+    res = TestClient(build_app()).get("/ui/", headers=_basic("anyone", raw))
+    assert res.status_code == 200
+    assert "Reload page" in res.text and "Copilot gateway for any harness" in res.text
+    assert "GitHub connections" in res.text and "Copilot models" in res.text
+
+
 def test_api_routes_still_need_proxy_key():
     client = TestClient(build_app())
     assert client.get("/v1/models").status_code == 401
