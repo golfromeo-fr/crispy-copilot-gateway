@@ -12,14 +12,15 @@ def mount(app) -> None:
     from nicegui import core, ui
 
     if not _mounted:
-        from .proxy import _gate_socketio
-
         ui.page("/")(index)
         ui.run_with(app, mount_path="/ui", title="crispy-copilot-gateway")
-        _gate_socketio(core.sio)
         _mounted = True
     else:
         app.mount("/ui", core.app)  # re-mount the configured app for extra apps (tests)
+    # NOTE: socket.io connect gating is intentionally NOT done here — wrapping NiceGUI's
+    # connect handler silently breaks event delivery (clicks never reach handlers). The
+    # HTTP middleware gates the page, statics, and polling; a direct websocket upgrade
+    # remains a known gap, acceptable for a 127.0.0.1-bound tool.
 
 
 def _render_connections(container) -> None:
@@ -81,9 +82,12 @@ def index() -> None:
         async def poll() -> None:
             if state["flow"] is None:
                 return
-            result = await connections.poll_once(state["flow"]["device_code"])
+            try:
+                result = await connections.poll_once(state["flow"]["device_code"])
+            except Exception:
+                return  # transient network error; keep polling
             if "access_token" in result:
-                state["flow"] = None; timer.active = False; code_label.text = ""
+                state["flow"] = None; timer.active = False; code_area.clear()
                 try:
                     await connections.complete_login(state["label"], result["access_token"])
                 except ValueError:
@@ -99,15 +103,25 @@ def index() -> None:
                 state["flow"] = None; timer.active = False
 
         timer = ui.timer(1.0, poll, active=False)
-        code_label = ui.label("")
+        code_area = ui.column()
 
         async def connect() -> None:
-            flow = await connections.start_device_flow()
+            try:
+                flow = await connections.start_device_flow()
+            except Exception as e:
+                ui.notify(f"Could not start device flow: {e}", type="negative")
+                return
             state.update(flow=flow, label=label_input.value,
                          interval=max(float(flow.get("interval", 5)), 5.0))
             timer.interval = state["interval"]
-            code_label.text = f"Enter code: {flow['user_code']}"
-            webbrowser.open(flow["verification_uri"])
+            code_area.clear()
+            with code_area:
+                ui.label(f"Enter code: {flow['user_code']}").classes("text-lg font-mono")
+                ui.link("Open github.com/login/device", flow["verification_uri"]).props("target=_blank")
+            try:
+                webbrowser.open(flow["verification_uri"])
+            except Exception:
+                pass  # headless server: use the link above instead
             timer.active = True
 
         label_input = ui.input("Label", value="github")

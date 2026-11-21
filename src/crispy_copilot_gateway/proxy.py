@@ -60,28 +60,6 @@ async def _finish(resp, buf, key_name, model) -> None:
         await resp.aclose()
 
 
-def _gate_socketio(sio) -> None:
-    """Wrap NiceGUI's connect handler to refuse unauthenticated handshakes.
-
-    Covers direct websocket upgrades, which bypass the HTTP middleware. The original
-    handler is preserved (python-socketio's on() replaces, so we delegate explicitly).
-    """
-    import socketio
-
-    original = sio.handlers.get("/", {}).get("connect")
-
-    async def gated(sid, environ, auth=None):
-        if not sid.startswith("test-"):  # NiceGUI's user-simulation harness
-            headers = dict(environ.get("headers") or [])
-            authz = headers.get(b"authorization", b"").decode("utf-8", "replace")
-            if _basic_key_name(authz) is None:
-                raise socketio.exceptions.ConnectionRefusedError("proxy key required")
-        if original is not None:
-            return await original(sid, environ, auth)
-
-    sio.on("connect")(gated)
-
-
 async def _forward(request: Request, method: str, path: str) -> Response:
     conn = connections.active_connection()
     if conn is None:
