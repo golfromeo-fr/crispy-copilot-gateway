@@ -1,12 +1,12 @@
 """Copilot models card: upstream model IDs, copyable for harness configs (ZCode etc.)."""
+from . import ui_common
 
 
 def card() -> None:
     from nicegui import ui
 
     state: dict = {"ids": [], "models": [], "error": None, "filter": "", "count_label": None}
-    with ui.expansion("Copilot models", caption="model ids for harness configs",
-                      icon="memory").classes("w-full"):
+    with ui_common.panel("Copilot models", "model ids for harness configs", "memory"):
         ui.label("Model ids Copilot serves for this account - copy the ones your harness needs.").classes(
             "text-sm opacity-60")
         count_label = ui.label("").classes("text-xs opacity-50")

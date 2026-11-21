@@ -118,3 +118,13 @@ def test_remove_clears_stale_active_label():
     import os
     assert connections.active_label() is None  # stale label cleared
     assert connections.active_connection()["github_token"] == "tok-a"  # falls back to first
+
+
+def test_effective_active_label_prefers_selection_then_first():
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    assert connections.effective_active_label() == "work"  # no selection -> first
+    connections.set_active("personal")
+    assert connections.effective_active_label() == "personal"
+    connections.remove("personal")
+    assert connections.effective_active_label() == "work"  # stale selection ignored

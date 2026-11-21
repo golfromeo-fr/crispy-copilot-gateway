@@ -129,7 +129,7 @@ def index() -> None:
 
     dark = ui.dark_mode(True)
     dark.bind_value(app.storage.user, "dark", backward=lambda v: True if v is None else v)
-    with ui.row().classes("w-full max-w-3xl mx-auto items-center justify-between"):
+    with ui.row().classes("w-full items-center justify-between"):
         with ui.row().classes("items-center gap-2"):
             ui.icon("hub", size="sm")
             ui.label("crispy-copilot-gateway").classes("text-2xl font-bold")
@@ -138,93 +138,95 @@ def index() -> None:
             ui_common.dark_toggle(dark)
             ui.button("Reload page", on_click=lambda: ui.run_javascript("window.location.reload()")).props("flat dense")
 
-    with ui.column().classes("w-full max-w-3xl mx-auto gap-4"):
-        with ui.expansion("GitHub connections",
-                          caption=f"{len(connections.load_all())} account(s), "
-                                  f"active: {connections.active_label() or '-'}",
-                          icon="link", value=True).classes("w-full"):
-            ui.label("Link a GitHub account; tokens never leave this machine.").classes("text-sm opacity-60")
-            conns = ui.column()
-            _render_connections(conns)
-            state = {"flow": None, "label": "", "interval": 5.0}
+    with ui.column().classes("w-full max-w-5xl mx-auto gap-4"):
+        with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-4 w-full items-start"):
+            with ui_common.panel("GitHub connections",
+                                 caption=f"{len(connections.load_all())} account(s), "
+                                         f"active: {connections.effective_active_label() or '-'}",
+                                 icon="link", expanded=True):
+                ui.label("Link a GitHub account; tokens never leave this machine.").classes("text-sm opacity-60")
+                conns = ui.column()
+                _render_connections(conns)
+                state = {"flow": None, "label": "", "interval": 5.0}
 
-            async def poll() -> None:
-                if state["flow"] is None:
-                    return
-                try:
-                    result = await connections.poll_once(state["flow"]["device_code"])
-                except Exception:
-                    return  # transient network error; keep polling
-                if "access_token" in result:
-                    state["flow"] = None; timer.active = False; code_area.clear()
-                    try:
-                        await connections.complete_login(state["label"], result["access_token"])
-                    except ValueError:
-                        ui.notify("GitHub account has no Copilot access - not connected.", type="negative")
+                async def poll() -> None:
+                    if state["flow"] is None:
                         return
-                    ui.notify(f"Connected '{state['label']}'.", type="positive")
-                    _render_connections(conns)
-                elif result.get("error") == "slow_down":
-                    state["interval"] += 5
+                    try:
+                        result = await connections.poll_once(state["flow"]["device_code"])
+                    except Exception:
+                        return  # transient network error; keep polling
+                    if "access_token" in result:
+                        state["flow"] = None; timer.active = False; code_area.clear()
+                        try:
+                            await connections.complete_login(state["label"], result["access_token"])
+                        except ValueError:
+                            ui.notify("GitHub account has no Copilot access - not connected.", type="negative")
+                            return
+                        ui.notify(f"Connected '{state['label']}'.", type="positive")
+                        _render_connections(conns)
+                    elif result.get("error") == "slow_down":
+                        state["interval"] += 5
+                        timer.interval = state["interval"]
+                    elif result.get("error") != "authorization_pending":
+                        ui.notify(f"Device flow failed: {result.get('error')}", type="negative")
+                        state["flow"] = None; timer.active = False
+
+                timer = ui.timer(1.0, poll, active=False)
+                code_area = ui.column()
+
+                async def connect() -> None:
+                    try:
+                        flow = await connections.start_device_flow()
+                    except Exception as e:
+                        ui.notify(f"Could not start device flow: {e}", type="negative")
+                        return
+                    state.update(flow=flow, label=label_input.value,
+                                 interval=max(float(flow.get("interval", 5)), 5.0))
                     timer.interval = state["interval"]
-                elif result.get("error") != "authorization_pending":
-                    ui.notify(f"Device flow failed: {result.get('error')}", type="negative")
-                    state["flow"] = None; timer.active = False
+                    code_area.clear()
+                    with code_area:
+                        ui.label(f"Enter code: {flow['user_code']}").classes("text-lg font-mono")
+                        ui.link("Open github.com/login/device", flow["verification_uri"]).props("target=_blank")
+                        ui.label("Sign in, enter the code, authorize. The gateway detects it automatically.").classes(
+                            "text-xs opacity-70")
+                    timer.active = True
 
-            timer = ui.timer(1.0, poll, active=False)
-            code_area = ui.column()
+                label_input = ui.input("Label", value="github")
+                ui.button("Connect via browser", on_click=connect)
 
-            async def connect() -> None:
-                try:
-                    flow = await connections.start_device_flow()
-                except Exception as e:
-                    ui.notify(f"Could not start device flow: {e}", type="negative")
-                    return
-                state.update(flow=flow, label=label_input.value,
-                             interval=max(float(flow.get("interval", 5)), 5.0))
-                timer.interval = state["interval"]
-                code_area.clear()
-                with code_area:
-                    ui.label(f"Enter code: {flow['user_code']}").classes("text-lg font-mono")
-                    ui.link("Open github.com/login/device", flow["verification_uri"]).props("target=_blank")
-                    ui.label("Sign in, enter the code, authorize. The gateway detects it automatically.").classes(
-                        "text-xs opacity-70")
-                timer.active = True
-
-            label_input = ui.input("Label", value="github")
-            ui.button("Connect via browser", on_click=connect)
-
-        with ui.expansion("Proxy API keys", caption=f"{len(keys.list_keys())} key(s)",
-                          icon="key", value=True).classes("w-full"):
-            ui.label("One key per harness (ZCode, Claude Code, ...). Copy it when created - it is shown once.").classes(
-                "text-sm opacity-60")
-            with ui.scroll_area().classes("max-h-48 w-full"):
-                key_rows = ui.column()
-            _render_keys(key_rows)
-
-            async def create_key() -> None:
-                name = name_input.value.strip()
-                try:
-                    raw = keys.create(name)
-                except ValueError:
-                    ui.notify(f"Key name already exists: '{name}'", type="negative")
-                    return
-                name_input.value = ""
-                _key_dialog(raw)
+            with ui_common.panel("Proxy API keys", caption=f"{len(keys.list_keys())} key(s)",
+                                 icon="key", expanded=True):
+                ui.label("One key per harness (ZCode, Claude Code, ...). Copy it when created - it is shown once.").classes(
+                    "text-sm opacity-60")
+                with ui.scroll_area().classes("max-h-48 w-full"):
+                    key_rows = ui.column()
                 _render_keys(key_rows)
 
-            name_input = ui.input("Key name")
-            ui.button("Create key", on_click=create_key)
+                async def create_key() -> None:
+                    name = name_input.value.strip()
+                    try:
+                        raw = keys.create(name)
+                    except ValueError:
+                        ui.notify(f"Key name already exists: '{name}'", type="negative")
+                        return
+                    name_input.value = ""
+                    _key_dialog(raw)
+                    _render_keys(key_rows)
 
-        t = usage.totals()
-        with ui.expansion("Copilot usage",
-                          caption=f"{t['requests']} request(s), {round(t['credits'], 2)} credits",
-                          icon="bar_chart").classes("w-full"):
-            ui.label("Live credits burned through this gateway (1 credit = $0.01).").classes("text-sm opacity-60")
-            totals_label = ui.label().classes("text-sm")
-            with ui.scroll_area().classes("max-h-48 w-full"):
-                usage_rows = ui.column()
-            _render_usage(usage_rows, totals_label)
-            ui.button("Refresh", on_click=lambda: _render_usage(usage_rows, totals_label))
+                name_input = ui.input("Key name")
+                ui.button("Create key", on_click=create_key)
 
-        ui_models.card()
+        with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-4 w-full items-start"):
+            t = usage.totals()
+            with ui_common.panel("Copilot usage",
+                                 caption=f"{t['requests']} request(s), {round(t['credits'], 4)} credits",
+                                 icon="bar_chart"):
+                ui.label("Live credits burned through this gateway (1 credit = $0.01).").classes("text-sm opacity-60")
+                totals_label = ui.label().classes("text-sm")
+                with ui.scroll_area().classes("max-h-48 w-full"):
+                    usage_rows = ui.column()
+                _render_usage(usage_rows, totals_label)
+                ui.button("Refresh", on_click=lambda: _render_usage(usage_rows, totals_label))
+
+            ui_models.card()

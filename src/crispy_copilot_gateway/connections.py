@@ -90,14 +90,22 @@ def load_all() -> dict:
 
 
 def active_label() -> str | None:
-    """Label of the user-selected active connection, or None when unset."""
+    """Label of the user-selected active connection, or None when unset/stale."""
     path = config.active_path()
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("label")
+        label = json.loads(path.read_text(encoding="utf-8")).get("label")
     except Exception:
         return None
+    # A stale label (account removed) must not present itself as active;
+    # routing falls back to the first entry.
+    return label if label in load_all() else None
+
+
+def effective_active_label() -> str | None:
+    """What routing actually uses: the selected label, else the first entry's."""
+    return active_label() or next(iter(load_all()), None)
 
 
 def set_active(label: str) -> bool:

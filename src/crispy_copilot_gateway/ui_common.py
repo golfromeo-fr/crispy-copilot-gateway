@@ -37,3 +37,11 @@ def dark_toggle(dark) -> None:
         ui.notify(f"Dark mode {'on' if dark.value else 'off'}", type="info")
 
     ui.button(icon="dark_mode", on_click=toggle).props("flat dense")
+
+
+def panel(title: str, caption: str, icon: str, expanded: bool = False):
+    """Rounded bordered foldable panel with consistent styling across the page."""
+    from nicegui import ui
+
+    return ui.expansion(title, caption=caption, icon=icon, value=expanded).classes(
+        "w-full rounded-xl border border-gray-300 dark:border-gray-700 overflow-hidden")
