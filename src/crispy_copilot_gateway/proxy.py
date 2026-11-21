@@ -1,6 +1,7 @@
 """FastAPI gateway: per-harness key auth + transparent forwarding to the Copilot upstream."""
 from __future__ import annotations
 
+import base64
 from contextlib import asynccontextmanager
 
 import httpx
@@ -11,6 +12,15 @@ from starlette.background import BackgroundTask
 from . import connections, copilot, keys
 
 upstream = httpx.AsyncClient(base_url=copilot.BASE_URL, timeout=None)
+
+
+def _basic_key_ok(header: str) -> bool:
+    """True when the HTTP Basic password part verifies as a proxy key (username ignored)."""
+    try:
+        _, _, password = base64.b64decode(header[6:]).decode("utf-8", "replace").partition(":")
+    except Exception:
+        return False
+    return header.startswith("Basic ") and keys.verify(password)
 
 
 async def _forward(request: Request, method: str, path: str) -> Response:
@@ -43,8 +53,16 @@ def build_app() -> FastAPI:
 
     @app.middleware("http")
     async def _auth(request: Request, call_next):
-        if request.url.path != "/healthz":
-            auth = request.headers.get("authorization", "")
+        path = request.url.path
+        if path == "/healthz":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if path.startswith("/ui") or "socket.io" in path:
+            # Browser gate: HTTP Basic whose password part must verify as a proxy key.
+            if not _basic_key_ok(auth):
+                return JSONResponse({"error": "invalid or missing proxy key"}, status_code=401,
+                                    headers={"WWW-Authenticate": 'Basic realm="crispy-copilot-gateway"'})
+        else:
             key = auth[7:] if auth.startswith("Bearer ") else request.headers.get("x-api-key", "")
             if not key or not keys.verify(key):
                 return JSONResponse({"error": "invalid or missing proxy key"}, status_code=401)
@@ -67,4 +85,7 @@ def build_app() -> FastAPI:
         return await _forward(request, "POST", "/responses")
 
     # TODO (P2): /v1/messages (Anthropic) route on Copilot is TBD in live testing - not routed yet.
+    from . import ui as gateway_ui
+
+    gateway_ui.mount(app)
     return app

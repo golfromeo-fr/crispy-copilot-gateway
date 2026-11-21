@@ -27,6 +27,13 @@ crispy-copilot key zcode
 crispy-copilot serve
 ```
 
+## Management UI
+
+`crispy-copilot serve` also serves a management UI at http://127.0.0.1:8812/ui. The browser
+asks for credentials: enter any username and one of your `ck_` proxy keys as the password.
+There you can connect GitHub accounts (device-flow login from the browser) and create or
+revoke proxy keys.
+
 ## Security
 
 - Binds 127.0.0.1 by default; a proxy key is required on every endpoint.
