@@ -1,5 +1,4 @@
 """NiceGUI management UI: GitHub login, proxy keys, and Copilot usage, under /ui."""
-import webbrowser
 
 from . import connections, keys, usage
 
@@ -118,10 +117,8 @@ def index() -> None:
             with code_area:
                 ui.label(f"Enter code: {flow['user_code']}").classes("text-lg font-mono")
                 ui.link("Open github.com/login/device", flow["verification_uri"]).props("target=_blank")
-            try:
-                webbrowser.open(flow["verification_uri"])
-            except Exception:
-                pass  # headless server: use the link above instead
+                ui.label("Sign in, enter the code, authorize. The gateway detects it automatically.").classes(
+                    "text-xs opacity-70")
             timer.active = True
 
         label_input = ui.input("Label", value="github")
