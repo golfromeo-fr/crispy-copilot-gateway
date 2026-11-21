@@ -51,6 +51,20 @@ def _record(key_name, model, parsed: dict) -> None:
                      parsed.get("output_tokens"), parsed.get("nano_aiu"))
 
 
+async def fetch_models() -> list[dict]:
+    """Copilot's /models payload via the active connection (token + endpoint)."""
+    conn = connections.active_connection()
+    if conn is None:
+        raise RuntimeError("no GitHub connection - connect a GitHub account in the UI at /ui")
+    base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
+    headers = copilot.upstream_headers(conn["github_token"])
+    req = upstream.build_request("GET", base + "/models", headers=headers)
+    resp = await upstream.send(req)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", []) if isinstance(data, dict) else data
+
+
 async def _finish(resp, buf, key_name, model) -> None:
     try:
         _record(key_name, model, usage.parse_sse(bytes(buf)))

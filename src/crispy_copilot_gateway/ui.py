@@ -72,6 +72,10 @@ def _render_usage(container) -> None:
 def index() -> None:
     from nicegui import ui
 
+    with ui.row().classes("w-full items-center justify-between"):
+        ui.label("crispy-copilot-gateway").classes("text-2xl font-bold")
+        ui.button("Reload page", on_click=lambda: ui.run_javascript("window.location.reload()")).props("flat dense")
+
     with ui.card():
         ui.label("GitHub connections").classes("text-lg font-bold")
         conns = ui.column()
@@ -149,3 +153,7 @@ def index() -> None:
         usage_rows = ui.column()
         _render_usage(usage_rows)
         ui.button("Refresh", on_click=lambda: _render_usage(usage_rows))
+
+    from . import ui_models
+
+    ui_models.card()

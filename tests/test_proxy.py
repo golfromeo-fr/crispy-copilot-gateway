@@ -1,4 +1,6 @@
 """Gateway auth, connection guard, forwarding, and metering against a mocked upstream."""
+import asyncio
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -92,3 +94,12 @@ def test_chat_completion_records_usage(monkeypatch):
     assert t["requests"] >= 1
     assert t["input_tokens"] >= 10 and t["output_tokens"] >= 5
     assert abs(t["cost_usd"] - 0.04473525) < 1e-9
+
+
+def test_fetch_models_uses_active_connection_bearer(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    models = asyncio.run(proxy.fetch_models())
+    assert models == [{"id": "gpt-5"}]
+    sent = calls[-1]
+    assert sent.method == "GET" and sent.url.path == "/models"
+    assert sent.headers["Authorization"] == "Bearer gh-token"
