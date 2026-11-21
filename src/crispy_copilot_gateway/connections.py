@@ -8,11 +8,17 @@ from datetime import UTC, datetime
 
 import httpx
 
-from . import config
+from . import config, copilot
 
-CLIENT_ID = os.environ.get("CRISPY_COPILOT_CLIENT_ID", "")
+# Default: opencode's registered Copilot OAuth client ID (from
+# /home/gr/opencode/packages/core/src/plugin/provider/github-copilot.ts). Using it
+# makes the device-flow grant identical to an opencode login; override with
+# CRISPY_COPILOT_CLIENT_ID only if you register your own app.
+CLIENT_ID = os.environ.get("CRISPY_COPILOT_CLIENT_ID", "Ov23li8tweQw6odWQebz")
 DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
+USER_URL = "https://api.github.com/copilot_internal/user"
+USER_API_VERSION = "2025-04-01"  # opencode's userApiVersion constant
 _SCOPE = "read:user"
 _GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
@@ -21,13 +27,22 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _gh_headers() -> dict:
+    """Headers opencode sends on github.com OAuth and api.github.com calls."""
+    return {
+        "Accept": "application/json",
+        "User-Agent": copilot.USER_AGENT,
+        "X-GitHub-Api-Version": USER_API_VERSION,
+    }
+
+
 async def start_device_flow() -> dict:
     """Step 1 of RFC 8628: returns verification_uri, user_code, device_code, interval."""
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             DEVICE_URL,
             json={"client_id": CLIENT_ID, "scope": _SCOPE},
-            headers={"Accept": "application/json"},
+            headers=_gh_headers(),
         )
         resp.raise_for_status()
         return resp.json()
@@ -40,15 +55,30 @@ async def poll_once(device_code: str) -> dict:
         resp = await http.post(
             TOKEN_URL,
             json={"client_id": CLIENT_ID, "device_code": device_code, "grant_type": _GRANT_TYPE},
-            headers={"Accept": "application/json"},
+            headers=_gh_headers(),
         )
         resp.raise_for_status()
         return resp.json()
 
 
-def save(label: str, github_token: str) -> None:
+async def verify_entitlement(github_token: str) -> dict:
+    """Read Copilot access + endpoint from /copilot_internal/user, like opencode at login.
+
+    Returns the raw user payload; callers check chat_enabled (False without Copilot)
+    and may store endpoints.api as the account's inference endpoint.
+    """
+    async with httpx.AsyncClient() as http:
+        resp = await http.get(USER_URL, headers={**_gh_headers(), "Authorization": f"Bearer {github_token}"})
+        resp.raise_for_status()
+        return resp.json()
+
+
+def save(label: str, github_token: str, api_endpoint: str | None = None) -> None:
     stored = load_all()
-    stored[label] = {"github_token": github_token, "added_at": _now()}
+    entry = {"github_token": github_token, "added_at": _now()}
+    if api_endpoint:
+        entry["api_endpoint"] = api_endpoint.rstrip("/")
+    stored[label] = entry
     config.write_private(config.connections_path(), json.dumps(stored, indent=2))
 
 

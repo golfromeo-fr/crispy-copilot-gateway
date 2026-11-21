@@ -6,12 +6,15 @@ import time
 
 import httpx
 
-from . import __version__
-
 BASE_URL = "https://api.githubcopilot.com"
 API_VERSION = "2026-08-01"  # matches opencode's apiVersion constant in github-copilot.ts
 TOKEN_ENDPOINT = "https://api.github.com/copilot_internal/v2/token"
 _REFRESH_MARGIN = 60  # refresh when fewer than this many seconds remain
+
+# Present as an opencode client end-to-end: the OAuth grant carries opencode's client
+# ID (see connections.CLIENT_ID), so requests keep the same User-Agent shape and
+# constants as packages/core/src/plugin/provider/github-copilot.ts.
+USER_AGENT = "opencode/stable/2.2.7/opencode"
 
 # NOTE (P1 live verification): opencode's provider performs NO /copilot_internal/v2/token
 # exchange - it sends the GitHub OAuth access token directly as the upstream bearer. The
@@ -43,5 +46,6 @@ def upstream_headers(copilot_token: str) -> dict[str, str]:
         "Accept": "application/json",
         "X-GitHub-Api-Version": API_VERSION,
         "Openai-Intent": "conversation-edits",
-        "User-Agent": f"crispy-copilot-gateway/{__version__}",
+        "x-initiator": "agent",
+        "User-Agent": USER_AGENT,
     }

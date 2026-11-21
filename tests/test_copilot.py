@@ -30,4 +30,5 @@ def test_upstream_headers_shape():
     assert headers["Authorization"] == "Bearer ctok"
     assert headers["X-GitHub-Api-Version"] == copilot.API_VERSION
     assert headers["Openai-Intent"] == "conversation-edits"
-    assert "crispy-copilot-gateway" in headers["User-Agent"]
+    assert headers["x-initiator"] == "agent"
+    assert headers["User-Agent"].startswith("opencode/")
