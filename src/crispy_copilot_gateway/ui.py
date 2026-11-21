@@ -1,49 +1,72 @@
-"""NiceGUI management UI: GitHub device-flow login and proxy keys, mounted under /ui."""
+"""NiceGUI management UI: GitHub login, proxy keys, and Copilot usage, under /ui."""
 import webbrowser
 
-from . import connections, keys
+from . import connections, keys, usage
 
 _mounted = False
 
 
 def mount(app) -> None:
-    """Wire the management UI into the FastAPI app; nicegui is imported lazily."""
+    """Wire the UI into the FastAPI app; nicegui imported lazily. Configures once."""
     global _mounted
     from nicegui import core, ui
 
     if not _mounted:
+        from .proxy import _gate_socketio
+
         ui.page("/")(index)
         ui.run_with(app, mount_path="/ui", title="crispy-copilot-gateway")
+        _gate_socketio(core.sio)
         _mounted = True
     else:
-        app.mount("/ui", core.app)  # NiceGUI configures once; re-mount for extra apps (tests)
+        app.mount("/ui", core.app)  # re-mount the configured app for extra apps (tests)
 
 
 def _render_connections(container) -> None:
-    """Rebuild the saved-connections rows: label plus the last 6 token chars."""
     from nicegui import ui
 
     container.clear()
     with container:
         for label, entry in connections.load_all().items():
             with ui.row().classes("items-center"):
-                ui.label(f"{label}  ...{entry['github_token'][-6:]}")
+                endpoint = entry.get("api_endpoint") or "github.com"
+                ui.label(f"{label}  added={entry.get('added_at', '')}  {endpoint}")
+                ui.button("Disconnect", on_click=lambda lbl=label: _disconnect(container, lbl))
+
+
+def _disconnect(container, label: str) -> None:
+    connections.remove(label)
+    _render_connections(container)
 
 
 def _render_keys(container) -> None:
-    """Rebuild the proxy-key rows with a revoke button per key."""
     from nicegui import ui
 
     container.clear()
     with container:
         for record in keys.list_keys():
             with ui.row().classes("items-center"):
-                ui.label(f"{record['name']}  created={record['created_at']}  last_used={record['last_used'] or 'never'}")
+                ui.label(f"{record['name']}  created={record['created_at']}  "
+                         f"last_used={record['last_used'] or 'never'}")
                 ui.button("Revoke", on_click=lambda name=record["name"]: _revoke(container, name))
 
 
 def _revoke(container, name: str) -> None:
-    keys.revoke(name); _render_keys(container)
+    keys.revoke(name)
+    _render_keys(container)
+
+
+def _render_usage(container) -> None:
+    from nicegui import ui
+
+    container.clear()
+    with container:
+        t = usage.totals()
+        ui.label(f"requests={t['requests']}  credits={round(t['credits'], 2)}  "
+                 f"cost_usd={round(t['cost_usd'], 4)}")
+        for row in usage.recent(10):
+            credits = round((row["nano_aiu"] or 0) / 1e9, 2)
+            ui.label(f"{row['ts']}  {row['key_name']}  {row['model']}  credits={credits}")
 
 
 def index() -> None:
@@ -61,17 +84,11 @@ def index() -> None:
             result = await connections.poll_once(state["flow"]["device_code"])
             if "access_token" in result:
                 state["flow"] = None; timer.active = False; code_label.text = ""
-                user = None
                 try:
-                    # Like opencode at login: a failed lookup must not deny a hiccup.
-                    user = await connections.verify_entitlement(result["access_token"])
-                except Exception:
-                    user = None
-                if user is not None and user.get("chat_enabled") is False:
+                    await connections.complete_login(state["label"], result["access_token"])
+                except ValueError:
                     ui.notify("GitHub account has no Copilot access - not connected.", type="negative")
                     return
-                api = (user or {}).get("endpoints", {}).get("api")
-                connections.save(state["label"], result["access_token"], api)
                 ui.notify(f"Connected '{state['label']}'.", type="positive")
                 _render_connections(conns)
             elif result.get("error") == "slow_down":
@@ -115,3 +132,9 @@ def index() -> None:
 
         name_input = ui.input("Key name")
         ui.button("Create key", on_click=create_key)
+
+    with ui.card():
+        ui.label("Copilot usage").classes("text-lg font-bold")
+        usage_rows = ui.column()
+        _render_usage(usage_rows)
+        ui.button("Refresh", on_click=lambda: _render_usage(usage_rows))

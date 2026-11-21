@@ -1,34 +1,40 @@
-"""Token exchange against a mocked transport; header contract."""
-import time
-
-import httpx
+"""Upstream header contract and vision detection (no token exchange)."""
+import json
 
 from crispy_copilot_gateway import copilot
 
 
-def _client(payload, calls):
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200, json=payload)
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-def test_exchange_returns_and_caches_token():
-    calls = []
-    expires = time.time() + 3600
-    http = _client({"token": "ctok", "expires_at": expires}, calls)
-    assert copilot.get_copilot_token.__name__ == "get_copilot_token"
-    import asyncio
-    tok = asyncio.run(copilot.get_copilot_token("gh", http))
-    tok2 = asyncio.run(copilot.get_copilot_token("gh", http))
-    assert tok == tok2 == "ctok"
-    assert len(calls) == 1  # second call served from cache
-
-
 def test_upstream_headers_shape():
-    headers = copilot.upstream_headers("ctok")
-    assert headers["Authorization"] == "Bearer ctok"
-    assert headers["X-GitHub-Api-Version"] == copilot.API_VERSION
-    assert headers["Openai-Intent"] == "conversation-edits"
-    assert headers["x-initiator"] == "agent"
-    assert headers["User-Agent"].startswith("opencode/")
+    h = copilot.upstream_headers("gh")
+    assert h["Authorization"] == "Bearer gh"
+    assert h["X-GitHub-Api-Version"] == copilot.API_VERSION
+    assert h["Openai-Intent"] == "conversation-edits"
+    assert h["x-initiator"] == "agent"
+    assert h["X-Interaction-Type"] == "conversation-agent"
+    assert h["X-Interaction-Id"]
+    assert h["User-Agent"].startswith("opencode/")
+    assert "Copilot-Vision-Request" not in h
+
+
+def test_upstream_headers_vision_and_interaction_id():
+    assert copilot.upstream_headers("gh", vision=True)["Copilot-Vision-Request"] == "true"
+    assert copilot.upstream_headers("gh", interaction_id="abc")["X-Interaction-Id"] == "abc"
+
+
+def test_has_vision_openai_image_url():
+    body = json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "hi"},
+        {"type": "image_url", "image_url": {"url": "x"}}]}]}).encode()
+    assert copilot.has_vision(body) is True
+
+
+def test_has_vision_responses_input_image():
+    body = json.dumps({"input": [{"role": "user", "content": [
+        {"type": "input_image", "image_url": "x"}]}]}).encode()
+    assert copilot.has_vision(body) is True
+
+
+def test_has_vision_plain_text_and_bad_input_false():
+    assert copilot.has_vision(json.dumps({"messages": [{"content": "hi"}]}).encode()) is False
+    assert copilot.has_vision(b"") is False
+    assert copilot.has_vision(b"not json") is False

@@ -1,7 +1,8 @@
-"""FastAPI gateway: per-harness key auth + transparent forwarding to the Copilot upstream."""
+"""FastAPI gateway: per-harness key auth, transparent Copilot forwarding, usage metering."""
 from __future__ import annotations
 
 import base64
+import json
 from contextlib import asynccontextmanager
 
 import httpx
@@ -9,38 +10,114 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import connections, copilot, keys
+from . import connections, copilot, keys, usage
 
-upstream = httpx.AsyncClient(base_url=copilot.BASE_URL, timeout=None)
+upstream = httpx.AsyncClient(
+    base_url=copilot.BASE_URL,
+    timeout=httpx.Timeout(connect=30.0, read=None, write=None, pool=None))
+
+_FWD_HEADERS = ("content-type", "retry-after")
+_FWD_PREFIXES = ("x-ratelimit", "x-request-id", "x-github")
+_SSE_CAP = 4_000_000
 
 
-def _basic_key_ok(header: str) -> bool:
-    """True when the HTTP Basic password part verifies as a proxy key (username ignored)."""
+def _basic_key_name(header: str) -> str | None:
+    """Key name when the HTTP Basic password part verifies (username ignored)."""
+    if not header.startswith("Basic "):
+        return None
     try:
         _, _, password = base64.b64decode(header[6:]).decode("utf-8", "replace").partition(":")
     except Exception:
-        return False
-    return header.startswith("Basic ") and keys.verify(password)
+        return None
+    return keys.identify(password)
+
+
+def _model_of(body: bytes) -> str | None:
+    try:
+        return json.loads(body).get("model")
+    except Exception:
+        return None
+
+
+def _forward_headers(resp: httpx.Response) -> dict:
+    # Forward only safe metadata; never content-length/transfer-encoding/connection.
+    return {k: v for k, v in resp.headers.items()
+            if k.lower() in _FWD_HEADERS or k.lower().startswith(_FWD_PREFIXES)}
+
+
+def _record(key_name, model, parsed: dict) -> None:
+    if parsed:
+        usage.record(key_name, model, parsed.get("input_tokens"),
+                     parsed.get("output_tokens"), parsed.get("nano_aiu"))
+
+
+async def _finish(resp, buf, key_name, model) -> None:
+    try:
+        _record(key_name, model, usage.parse_sse(bytes(buf)))
+    except Exception:
+        pass  # metering is best-effort and must never surface into the stream
+    finally:
+        await resp.aclose()
+
+
+def _gate_socketio(sio) -> None:
+    """Wrap NiceGUI's connect handler to refuse unauthenticated handshakes.
+
+    Covers direct websocket upgrades, which bypass the HTTP middleware. The original
+    handler is preserved (python-socketio's on() replaces, so we delegate explicitly).
+    """
+    import socketio
+
+    original = sio.handlers.get("/", {}).get("connect")
+
+    async def gated(sid, environ, auth=None):
+        if not sid.startswith("test-"):  # NiceGUI's user-simulation harness
+            headers = dict(environ.get("headers") or [])
+            authz = headers.get(b"authorization", b"").decode("utf-8", "replace")
+            if _basic_key_name(authz) is None:
+                raise socketio.exceptions.ConnectionRefusedError("proxy key required")
+        if original is not None:
+            return await original(sid, environ, auth)
+
+    sio.on("connect")(gated)
 
 
 async def _forward(request: Request, method: str, path: str) -> Response:
+    conn = connections.active_connection()
+    if conn is None:
+        raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
+    github_token = conn["github_token"]
+    base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
-    github_token = connections.first_token()
-    if github_token is None:
-        raise HTTPException(503, "no GitHub connection - run crispy-copilot login <label>")
-    copilot_token = await copilot.get_copilot_token(github_token, upstream)
-    headers = copilot.upstream_headers(copilot_token)
+    headers = copilot.upstream_headers(github_token, vision=copilot.has_vision(body))
     headers["Content-Type"] = request.headers.get("content-type", "application/json")
-    # TODO (P4): multi-account (per-key -> connection mapping); every key currently uses first_token().
-    req = upstream.build_request(method, path, content=body, headers=headers)
+    # TODO (P4): per-key -> connection mapping; every key currently uses the first connection.
+    # Absolute url overrides the client base_url, routing to this connection's endpoint.
+    req = upstream.build_request(method, base + path, content=body, headers=headers)
     resp = await upstream.send(req, stream=True)
+    fwd = _forward_headers(resp)
     media_type = resp.headers.get("content-type")
+    key_name = getattr(request.state, "proxy_key", None)
+    model = _model_of(body)
     if "text/event-stream" in (media_type or ""):
-        return StreamingResponse(resp.aiter_raw(), status_code=resp.status_code, media_type=media_type,
-                                 background=BackgroundTask(resp.aclose))
+        buf = bytearray()
+
+        async def tap():
+            async for chunk in resp.aiter_raw():
+                if len(buf) < _SSE_CAP:
+                    buf.extend(chunk[:_SSE_CAP - len(buf)])
+                yield chunk  # byte-identical passthrough; metering never alters the stream
+
+        return StreamingResponse(tap(), status_code=resp.status_code, media_type=media_type,
+                                 headers=fwd,
+                                 background=BackgroundTask(_finish, resp, buf, key_name, model))
     content = await resp.aread()
     await resp.aclose()
-    return Response(content=content, status_code=resp.status_code, media_type=media_type)
+    try:
+        _record(key_name, model, usage.parse_usage(json.loads(content)))
+    except Exception:
+        pass
+    return Response(content=content, status_code=resp.status_code, media_type=media_type, headers=fwd)
 
 
 def build_app() -> FastAPI:
@@ -58,14 +135,16 @@ def build_app() -> FastAPI:
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         if path.startswith("/ui") or "socket.io" in path:
-            # Browser gate: HTTP Basic whose password part must verify as a proxy key.
-            if not _basic_key_ok(auth):
+            name = _basic_key_name(auth)
+            if name is None:
                 return JSONResponse({"error": "invalid or missing proxy key"}, status_code=401,
                                     headers={"WWW-Authenticate": 'Basic realm="crispy-copilot-gateway"'})
         else:
             key = auth[7:] if auth.startswith("Bearer ") else request.headers.get("x-api-key", "")
-            if not key or not keys.verify(key):
+            name = keys.identify(key) if key else None
+            if name is None:
                 return JSONResponse({"error": "invalid or missing proxy key"}, status_code=401)
+        request.state.proxy_key = name
         return await call_next(request)
 
     @app.get("/healthz")

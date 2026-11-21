@@ -24,6 +24,7 @@ def test_ui_accepts_proxy_key_as_password():
     res = TestClient(build_app()).get("/ui/", headers=_basic("anyone", raw))
     assert res.status_code == 200
     assert "Proxy API keys" in res.text
+    assert "Copilot usage" in res.text
 
 
 def test_ui_rejects_wrong_password():

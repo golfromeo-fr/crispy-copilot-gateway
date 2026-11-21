@@ -89,8 +89,36 @@ def load_all() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def first_token() -> str | None:
-    """First stored GitHub token in insertion order, or None when no connection exists."""
+def active_connection() -> dict | None:
+    """First stored connection entry in insertion order, or None."""
     for entry in load_all().values():
-        return entry["github_token"]
+        return entry
     return None
+
+
+def first_token() -> str | None:
+    entry = active_connection()
+    return entry["github_token"] if entry else None
+
+
+def remove(label: str) -> bool:
+    stored = load_all()
+    if label not in stored:
+        return False
+    del stored[label]
+    config.write_private(config.connections_path(), json.dumps(stored, indent=2))
+    return True
+
+
+async def complete_login(label: str, github_token: str) -> dict:
+    """Verify entitlement (tolerating hiccups like opencode), then store the connection."""
+    user = None
+    try:
+        user = await verify_entitlement(github_token)
+    except Exception:
+        user = None  # a failed lookup must not turn a GitHub hiccup into a denial
+    if user is not None and user.get("chat_enabled") is False:
+        raise ValueError("GitHub account has no Copilot access")
+    api = (user or {}).get("endpoints", {}).get("api")
+    save(label, github_token, api)
+    return {"label": label, "api_endpoint": api}

@@ -42,10 +42,10 @@ def create(name: str) -> str:
     return raw
 
 
-def verify(raw: str) -> bool:
-    """Return True and stamp last_used (throttled) when raw matches a stored key hash."""
+def identify(raw: str) -> str | None:
+    """Return the matched key name (constant-time), throttle-stamping last_used."""
     if not raw:
-        return False
+        return None
     digest = _hash(raw)
     keys = _load()
     for entry in keys:
@@ -53,8 +53,12 @@ def verify(raw: str) -> bool:
             if _stamp_due(entry):
                 entry["last_used"] = _now()
                 _save(keys)
-            return True
-    return False
+            return entry["name"]
+    return None
+
+
+def verify(raw: str) -> bool:
+    return identify(raw) is not None
 
 
 _LAST_USED_INTERVAL = 60  # seconds between last_used writes per key

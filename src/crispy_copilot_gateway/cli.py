@@ -16,10 +16,6 @@ def serve(host: str = typer.Option(config.DEFAULT_HOST, "--host"),
 @app.command()
 def login(label: str) -> None:
     """Connect a GitHub account via the OAuth device flow."""
-    if not connections.CLIENT_ID:
-        typer.echo("No OAuth client ID. Register an OAuth app at https://github.com/settings/"
-                   "developers (device flow needs no secret), then export CRISPY_COPILOT_CLIENT_ID.")
-        raise typer.Exit(1)
     asyncio.run(_device_flow(label))
 
 async def _device_flow(label: str) -> None:
@@ -30,7 +26,11 @@ async def _device_flow(label: str) -> None:
     while True:
         result = await connections.poll_once(flow["device_code"])
         if "access_token" in result:
-            connections.save(label, result["access_token"])
+            try:
+                await connections.complete_login(label, result["access_token"])
+            except ValueError as e:
+                typer.echo(str(e))
+                raise typer.Exit(1)
             typer.echo(f"Connected '{label}'.")
             return
         error = result.get("error", "")

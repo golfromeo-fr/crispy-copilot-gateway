@@ -1,51 +1,52 @@
-"""Copilot inference-token exchange and upstream request headers."""
-
+"""Upstream request headers for api.githubcopilot.com (opencode-compatible)."""
 from __future__ import annotations
 
-import time
-
-import httpx
+import json
+import uuid
 
 BASE_URL = "https://api.githubcopilot.com"
-API_VERSION = "2026-08-01"  # matches opencode's apiVersion constant in github-copilot.ts
-TOKEN_ENDPOINT = "https://api.github.com/copilot_internal/v2/token"
-_REFRESH_MARGIN = 60  # refresh when fewer than this many seconds remain
-
-# Present as an opencode client end-to-end: the OAuth grant carries opencode's client
-# ID (see connections.CLIENT_ID), so requests keep the same User-Agent shape and
-# constants as packages/core/src/plugin/provider/github-copilot.ts.
+API_VERSION = "2026-08-01"  # opencode's apiVersion constant
+# Present as an opencode client end-to-end; the OAuth grant uses opencode's client ID.
 USER_AGENT = "opencode/stable/2.2.7/opencode"
 
-# NOTE (P1 live verification): opencode's provider performs NO /copilot_internal/v2/token
-# exchange - it sends the GitHub OAuth access token directly as the upstream bearer. The
-# VS Code editor flow does exchange at TOKEN_ENDPOINT, but the payload field names
-# {"token", "expires_at"} (expires_at assumed epoch seconds) must be verified live in P1.
-_tokens: dict[str, tuple[str, float]] = {}  # github_token -> (copilot_token, expires_at)
 
-
-async def get_copilot_token(github_token: str, http: httpx.AsyncClient) -> str:
-    """Exchange (cached) a GitHub token for a short-lived Copilot inference token."""
-    cached = _tokens.get(github_token)
-    if cached and cached[1] - time.time() >= _REFRESH_MARGIN:
-        return cached[0]
-    resp = await http.get(
-        TOKEN_ENDPOINT,
-        headers={"Accept": "application/json", "Authorization": f"Bearer {github_token}"},
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    copilot_token = payload["token"]
-    _tokens[github_token] = (copilot_token, float(payload["expires_at"]))
-    return copilot_token
-
-
-def upstream_headers(copilot_token: str) -> dict[str, str]:
-    """Headers for api.githubcopilot.com, mirroring opencode's applyHeaders()."""
-    return {
-        "Authorization": f"Bearer {copilot_token}",
+def upstream_headers(github_token: str, *, vision: bool = False,
+                     interaction_id: str | None = None) -> dict[str, str]:
+    """opencode sends the GitHub OAuth token directly as the bearer (no token exchange)."""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
         "Accept": "application/json",
         "X-GitHub-Api-Version": API_VERSION,
         "Openai-Intent": "conversation-edits",
         "x-initiator": "agent",
+        "X-Interaction-Type": "conversation-agent",
+        "X-Interaction-Id": interaction_id or str(uuid.uuid4()),
         "User-Agent": USER_AGENT,
     }
+    if vision:
+        headers["Copilot-Vision-Request"] = "true"
+    return headers
+
+
+def _has_image_parts(parts) -> bool:
+    if not isinstance(parts, list):
+        return False
+    return any(isinstance(p, dict) and p.get("type") in
+               ("image_url", "input_image", "image") for p in parts)
+
+
+def has_vision(body: bytes) -> bool:
+    """Detect image parts across OpenAI chat, OpenAI responses, and Anthropic shapes."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    for message in obj.get("messages") or []:
+        if isinstance(message, dict) and _has_image_parts(message.get("content")):
+            return True
+    for item in obj.get("input") or []:
+        if isinstance(item, dict) and _has_image_parts(item.get("content")):
+            return True
+    return False
