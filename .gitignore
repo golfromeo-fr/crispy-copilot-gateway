@@ -1,6 +1,22 @@
+# Python / build
 __pycache__/
 *.pyc
 .venv/
 dist/
 *.egg-info/
+.pytest_cache/
+
+# Local config & secrets (never commit)
 .env
+.env*
+
+# Runtime state — normally lives OUTSIDE the repo in
+# ~/.local/share/crispy-copilot-gateway, but ignore it here too in case
+# CRISPY_COPILOT_DATA_DIR is pointed inside the tree.
+connections.json
+api-keys.json
+usage.db
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
