@@ -1,5 +1,5 @@
 """crispy-copilot CLI: serve the gateway, log in to GitHub, manage proxy keys."""
-import asyncio, time, webbrowser
+import asyncio, webbrowser
 import typer
 
 from . import config, connections, keys
@@ -39,7 +39,7 @@ async def _device_flow(label: str) -> None:
         elif error != "authorization_pending":
             typer.echo(f"Device flow failed: {error}")
             raise typer.Exit(1)
-        time.sleep(interval + 1)
+        await asyncio.sleep(interval + 1)
 
 @app.command()
 def key(name: str) -> None:

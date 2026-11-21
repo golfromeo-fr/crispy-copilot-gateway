@@ -43,17 +43,29 @@ def create(name: str) -> str:
 
 
 def verify(raw: str) -> bool:
-    """Return True and stamp last_used when raw matches a stored key hash."""
+    """Return True and stamp last_used (throttled) when raw matches a stored key hash."""
     if not raw:
         return False
     digest = _hash(raw)
     keys = _load()
     for entry in keys:
         if secrets.compare_digest(entry["key_hash"], digest):
-            entry["last_used"] = _now()
-            _save(keys)
+            if _stamp_due(entry):
+                entry["last_used"] = _now()
+                _save(keys)
             return True
     return False
+
+
+_LAST_USED_INTERVAL = 60  # seconds between last_used writes per key
+
+
+def _stamp_due(entry: dict) -> bool:
+    stamp = entry.get("last_used")
+    if stamp is None:
+        return True
+    age = datetime.now(UTC) - datetime.fromisoformat(stamp)
+    return age.total_seconds() >= _LAST_USED_INTERVAL
 
 
 def revoke(name: str) -> bool:
