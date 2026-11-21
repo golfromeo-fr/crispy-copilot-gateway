@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import connections, copilot, keys, usage
+from . import adapt, adapt_stream, connections, copilot, keys, usage
 
 upstream = httpx.AsyncClient(
     base_url=copilot.BASE_URL,
@@ -85,6 +85,14 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     github_token = conn["github_token"]
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
+    model = _model_of(body)
+    upstream_path, body_out, adapted = path, body, False
+    if path == "/chat/completions" and await adapt.upstream_kind(model) == "responses":
+        try:
+            body_out = json.dumps(adapt.chat_to_responses_body(json.loads(body))).encode()
+            upstream_path, adapted = "/responses", True
+        except Exception:
+            pass  # malformed chat body -> fail-open passthrough
     headers = copilot.upstream_headers(github_token, vision=copilot.has_vision(body))
     # Preserve protocol headers the client sent (anthropic-version, OpenAI-Beta, ...);
     # auth and hop-by-hop headers are dropped, Copilot's own are overlaid last.
@@ -94,13 +102,18 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     headers["Content-Type"] = request.headers.get("content-type", "application/json")
     # TODO (P4): per-key -> connection mapping; every key currently uses the first connection.
     # Absolute url overrides the client base_url, routing to this connection's endpoint.
-    req = upstream.build_request(method, base + path, content=body, headers=headers)
+    req = upstream.build_request(method, base + upstream_path, content=body_out, headers=headers)
     resp = await upstream.send(req, stream=True)
     fwd = _forward_headers(resp)
     media_type = resp.headers.get("content-type")
     key_name = getattr(request.state, "proxy_key", None)
-    model = _model_of(body)
     if "text/event-stream" in (media_type or ""):
+        if adapted:
+            # Translator consumes frames and meters usage itself; just close upstream after.
+            return StreamingResponse(
+                adapt_stream.sse_to_chat(resp.aiter_raw(), key_name=key_name, model=model),
+                status_code=resp.status_code, media_type=media_type, headers=fwd,
+                background=BackgroundTask(resp.aclose))
         buf = bytearray()
 
         async def tap():
@@ -114,6 +127,14 @@ async def _forward(request: Request, method: str, path: str) -> Response:
                                  background=BackgroundTask(_finish, resp, buf, key_name, model))
     content = await resp.aread()
     await resp.aclose()
+    if adapted:
+        try:
+            payload = json.loads(content)
+            _record(key_name, model, usage.parse_usage(payload))
+            chat = adapt.responses_to_chat_response(payload, model or "")
+        except Exception:
+            return Response(content=content, status_code=resp.status_code, media_type=media_type)
+        return JSONResponse(chat, status_code=resp.status_code, headers=fwd)
     try:
         _record(key_name, model, usage.parse_usage(json.loads(content)))
     except Exception:
