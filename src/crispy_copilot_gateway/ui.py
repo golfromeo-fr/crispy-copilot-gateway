@@ -30,16 +30,31 @@ def _render_connections(container) -> None:
     container.clear()
     with container:
         stored = connections.load_all()
+        labels = list(stored.keys())
+        active = connections.active_label()
+        if labels:
+            ui.radio(labels, value=active if active in labels else labels[0],
+                     on_change=lambda e: _activate(container, e.value)).props("dense inline")
         if not stored:
             ui.label("No GitHub account connected yet - use Connect via browser below.").classes("opacity-60")
         for label, entry in stored.items():
             endpoint = entry.get("api_endpoint") or "github.com"
             with ui.row().classes("items-center"):
                 ui.label(f"{label}  added={entry.get('added_at', '')}  {endpoint}")
+                if label == active:
+                    ui.badge("active", color="grey")
                 ui.button("Disconnect", on_click=lambda lbl=label: ui_common.confirm(
                     "Disconnect account?",
                     f"Gateway requests for '{lbl}' will fail until you reconnect.",
                     "Disconnect", lambda lbl=lbl: _disconnect(container, lbl)))
+
+
+def _activate(container, label: str) -> None:
+    from nicegui import ui
+
+    connections.set_active(label)
+    ui.notify(f"Active account: {label}", type="positive")
+    _render_connections(container)
 
 
 def _disconnect(container, label: str) -> None:
@@ -77,14 +92,14 @@ def _revoke(container, name: str) -> None:
     _render_keys(container)
 
 
-def _render_usage(container) -> None:
+def _render_usage(container, totals_label) -> None:
     from nicegui import ui
 
+    t = usage.totals()
+    totals_label.text = (f"requests={t['requests']}  credits={round(t['credits'], 4)}  "
+                         f"cost_usd={round(t['cost_usd'], 6)}")
     container.clear()
     with container:
-        t = usage.totals()
-        ui.label(f"requests={t['requests']}  credits={round(t['credits'], 4)}  "
-                 f"cost_usd={round(t['cost_usd'], 6)}")
         rows = usage.recent(10)
         if not rows:
             ui.label("No requests yet.").classes("opacity-60")
@@ -124,8 +139,10 @@ def index() -> None:
             ui.button("Reload page", on_click=lambda: ui.run_javascript("window.location.reload()")).props("flat dense")
 
     with ui.column().classes("w-full max-w-3xl mx-auto gap-4"):
-        with ui.card().classes("w-full"):
-            ui.label("GitHub connections").classes("text-lg font-bold")
+        with ui.expansion("GitHub connections",
+                          caption=f"{len(connections.load_all())} account(s), "
+                                  f"active: {connections.active_label() or '-'}",
+                          icon="link", value=True).classes("w-full"):
             ui.label("Link a GitHub account; tokens never leave this machine.").classes("text-sm opacity-60")
             conns = ui.column()
             _render_connections(conns)
@@ -177,11 +194,12 @@ def index() -> None:
             label_input = ui.input("Label", value="github")
             ui.button("Connect via browser", on_click=connect)
 
-        with ui.card().classes("w-full"):
-            ui.label("Proxy API keys").classes("text-lg font-bold")
+        with ui.expansion("Proxy API keys", caption=f"{len(keys.list_keys())} key(s)",
+                          icon="key", value=True).classes("w-full"):
             ui.label("One key per harness (ZCode, Claude Code, ...). Copy it when created - it is shown once.").classes(
                 "text-sm opacity-60")
-            key_rows = ui.column()
+            with ui.scroll_area().classes("max-h-48 w-full"):
+                key_rows = ui.column()
             _render_keys(key_rows)
 
             async def create_key() -> None:
@@ -198,11 +216,15 @@ def index() -> None:
             name_input = ui.input("Key name")
             ui.button("Create key", on_click=create_key)
 
-        with ui.card().classes("w-full"):
-            ui.label("Copilot usage").classes("text-lg font-bold")
+        t = usage.totals()
+        with ui.expansion("Copilot usage",
+                          caption=f"{t['requests']} request(s), {round(t['credits'], 2)} credits",
+                          icon="bar_chart").classes("w-full"):
             ui.label("Live credits burned through this gateway (1 credit = $0.01).").classes("text-sm opacity-60")
-            usage_rows = ui.column()
-            _render_usage(usage_rows)
-            ui.button("Refresh", on_click=lambda: _render_usage(usage_rows))
+            totals_label = ui.label().classes("text-sm")
+            with ui.scroll_area().classes("max-h-48 w-full"):
+                usage_rows = ui.column()
+            _render_usage(usage_rows, totals_label)
+            ui.button("Refresh", on_click=lambda: _render_usage(usage_rows, totals_label))
 
         ui_models.card()

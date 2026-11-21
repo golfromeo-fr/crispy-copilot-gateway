@@ -22,6 +22,10 @@ def connections_path() -> Path:
     return data_dir() / "connections.json"
 
 
+def active_path() -> Path:
+    return data_dir() / "active.json"
+
+
 def keys_path() -> Path:
     return data_dir() / "api-keys.json"
 

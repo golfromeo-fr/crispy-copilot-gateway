@@ -4,12 +4,14 @@
 def card() -> None:
     from nicegui import ui
 
-    state: dict = {"ids": [], "models": [], "error": None, "filter": ""}
-    with ui.card().classes("w-full"):
-        ui.label("Copilot models").classes("text-lg font-bold")
+    state: dict = {"ids": [], "models": [], "error": None, "filter": "", "count_label": None}
+    with ui.expansion("Copilot models", caption="model ids for harness configs",
+                      icon="memory").classes("w-full"):
         ui.label("Model ids Copilot serves for this account - copy the ones your harness needs.").classes(
             "text-sm opacity-60")
-        rows = ui.column()
+        count_label = ui.label("").classes("text-xs opacity-50")
+        with ui.scroll_area().classes("max-h-96 w-full"):
+            rows = ui.column()
         filt = ui.input(placeholder="Filter models...").classes("w-full")
 
         def refilter(change) -> None:
@@ -21,6 +23,7 @@ def card() -> None:
             ui.button("Copy all ids", on_click=lambda: _copy_all(state["ids"]))
             ui.button("Refresh", on_click=lambda: load(rows, state))
         ui.timer(0.1, lambda: load(rows, state), once=True)
+    state["count_label"] = count_label
 
 
 def _copy(text: str) -> None:
@@ -60,8 +63,10 @@ def _render(rows, state, models: list[dict] | None = None, error: str | None = N
     error = state.get("error")
     all_models = state.get("models") or []
     shown = _visible(state)
-    count = (f"{len(shown)} of {len(all_models)} models" if not error
-             else f"{len(shown)} models")  # no total when the fetch failed
+    count = (f"{len(shown)} of {len(all_models)} ids" if not error
+             else f"{len(shown)} ids")  # no total when the fetch failed
+    if state.get("count_label") is not None:
+        state["count_label"].text = count
     rows.clear()
     ids: list[str] = []
     with rows:
@@ -69,8 +74,6 @@ def _render(rows, state, models: list[dict] | None = None, error: str | None = N
             ui.label(error).classes("text-red")
         elif not all_models:
             ui.label("no models returned").classes("opacity-60")
-        if all_models:
-            ui.label(count).classes("text-xs opacity-50")
         for m in shown:  # stale rows keep working (and filtering) after a refresh error
             mid = m.get("id", "")
             ids.append(mid)

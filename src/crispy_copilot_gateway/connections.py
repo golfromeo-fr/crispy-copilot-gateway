@@ -89,9 +89,32 @@ def load_all() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def active_label() -> str | None:
+    """Label of the user-selected active connection, or None when unset."""
+    path = config.active_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("label")
+    except Exception:
+        return None
+
+
+def set_active(label: str) -> bool:
+    """Mark label active (0600 store); only when the label exists."""
+    if label not in load_all():
+        return False
+    config.write_private(config.active_path(), json.dumps({"label": label}))
+    return True
+
+
 def active_connection() -> dict | None:
-    """First stored connection entry in insertion order, or None."""
-    for entry in load_all().values():
+    """The stored label's entry, falling back to the first entry (insertion order)."""
+    stored = load_all()
+    label = active_label()
+    if label is not None and label in stored:
+        return stored[label]
+    for entry in stored.values():
         return entry
     return None
 
@@ -107,6 +130,10 @@ def remove(label: str) -> bool:
         return False
     del stored[label]
     config.write_private(config.connections_path(), json.dumps(stored, indent=2))
+    # Clear a stale active label so the UI doesn't claim a removed account is
+    # active; routing already falls back to the first entry.
+    if active_label() == label:
+        config.active_path().unlink(missing_ok=True)
     return True
 
 
@@ -121,4 +148,5 @@ async def complete_login(label: str, github_token: str) -> dict:
         raise ValueError("GitHub account has no Copilot access")
     api = (user or {}).get("endpoints", {}).get("api")
     save(label, github_token, api)
+    set_active(label)  # a freshly connected account becomes the active one
     return {"label": label, "api_endpoint": api}

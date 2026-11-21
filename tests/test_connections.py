@@ -60,3 +60,61 @@ def test_remove_roundtrip():
     assert connections.remove("work") is True
     assert connections.load_all() == {}
     assert connections.remove("work") is False
+
+
+def test_set_active_roundtrip_writes_private():
+    connections.save("work", "tok-a")
+    assert connections.set_active("work") is True
+    assert config.active_path().stat().st_mode & 0o777 == 0o600
+    assert connections.active_label() == "work"
+    assert connections.active_connection()["github_token"] == "tok-a"
+
+
+def test_active_connection_prefers_stored_label():
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("personal")
+    assert connections.active_connection()["github_token"] == "tok-b"
+
+
+def test_active_connection_falls_back_without_active_file():
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    assert connections.active_label() is None
+    assert connections.active_connection()["github_token"] == "tok-a"  # insertion order
+
+
+def test_active_connection_falls_back_when_label_stale():
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("personal")
+    connections.remove("personal")
+    # remove() clears the stale active label so the UI never claims a removed
+    # account is active; routing still falls back to the first entry.
+    assert connections.active_label() is None
+    assert connections.active_connection()["github_token"] == "tok-a"
+
+
+def test_set_active_unknown_label_returns_false():
+    connections.save("work", "tok-a")
+    assert connections.set_active("ghost") is False
+    assert connections.active_label() is None  # active.json never written
+
+
+def test_complete_login_activates_new_connection(monkeypatch):
+    async def fake(token):
+        return {"chat_enabled": True}
+    monkeypatch.setattr(connections, "verify_entitlement", fake)
+    asyncio.run(connections.complete_login("fresh", "tok-f"))
+    assert connections.active_label() == "fresh"
+    assert connections.active_connection()["github_token"] == "tok-f"
+
+
+def test_remove_clears_stale_active_label():
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("personal")
+    assert connections.remove("personal") is True
+    import os
+    assert connections.active_label() is None  # stale label cleared
+    assert connections.active_connection()["github_token"] == "tok-a"  # falls back to first
