@@ -18,7 +18,6 @@ def _patch_flow(monkeypatch, complete):
     monkeypatch.setattr(connections, "start_device_flow", start)
     monkeypatch.setattr(connections, "poll_once", poll)
     monkeypatch.setattr(connections, "complete_login", complete)
-    monkeypatch.setattr("crispy_copilot_gateway.cli.webbrowser.open", lambda url: None)
 
 
 def test_login_completes_device_flow(monkeypatch):
@@ -29,6 +28,7 @@ def test_login_completes_device_flow(monkeypatch):
     result = runner.invoke(app, ["login", "work"])
     assert result.exit_code == 0
     assert "Connected 'work'." in result.output
+    assert "https://github.com/login/device" in result.output  # link printed, not auto-opened
     assert connections.load_all()["work"]["github_token"] == "gh-token"
 
 

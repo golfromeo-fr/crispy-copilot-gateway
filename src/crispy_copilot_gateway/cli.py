@@ -1,5 +1,6 @@
 """crispy-copilot CLI: serve the gateway, log in to GitHub, manage proxy keys."""
-import asyncio, webbrowser
+import asyncio
+
 import typer
 
 from . import config, connections, keys
@@ -22,7 +23,7 @@ async def _device_flow(label: str) -> None:
     flow = await connections.start_device_flow()
     interval = max(int(flow.get("interval", 5)), 5)
     typer.echo(f"One-time code: {flow['user_code']}")
-    webbrowser.open(flow["verification_uri"])
+    typer.echo(f"Open {flow['verification_uri']} and enter the code to authorize.")
     while True:
         result = await connections.poll_once(flow["device_code"])
         if "access_token" in result:

@@ -19,8 +19,11 @@ def mount(app) -> None:
         app.mount("/ui", core.app)  # re-mount the configured app for extra apps (tests)
     # NOTE: socket.io connect gating is intentionally NOT done here - wrapping NiceGUI's
     # connect handler silently breaks event delivery (clicks never reach handlers). The
-    # HTTP middleware gates the page, statics, and polling; a direct websocket upgrade
-    # remains a known gap, acceptable for a 127.0.0.1-bound tool.
+    # HTTP middleware gates the page, statics, and polling (Basic auth). A websocket
+    # upgrade carries no Basic credentials (browsers don't resend them), so it cannot be
+    # header-gated without breaking the UI; Engine.IO rejects sid-less upgrades (HTTP 403,
+    # verified live) and the only sid-issuing path (polling) is auth-gated, so the realtime
+    # socket is not reachable unauthenticated.
 
 
 def _render_connections(container) -> None:
