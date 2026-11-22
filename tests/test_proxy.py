@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from crispy_copilot_gateway import adapt, connections, keys, proxy, usage
+from crispy_copilot_gateway import adapt, connections, keys, proxy, routing, usage
 
 FALLBACK_ARMED = {"on": False}  # fallback tests arm it; handler then 400s mai-code-2-flash
 
@@ -57,8 +57,8 @@ def _make_client(monkeypatch, *, connected=True):
                            b'"item":{"type":"message","role":"assistant"}}\n\n')
                     yield b'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
                     yield (b'data: {"type":"response.completed","response":{"id":"r9",'
-                           b'"usage":{"input_tokens":7,"output_tokens":3},'
-                           b'"copilot_usage":{"total_nano_aiu":4473525000}}}\n\n')
+                           b'"usage":{"input_tokens":7,"output_tokens":3}},'
+                           b'"copilot_usage":{"total_nano_aiu":4473525000}}\n\n')
                 return httpx.Response(200, content=rsse(),
                                       headers={"content-type": "text/event-stream"})
             output = [{"type": "message", "content": [{"type": "output_text", "text": "Hello"}]}]
@@ -306,3 +306,101 @@ def test_messages_native_passthrough_for_chat_only_model(monkeypatch):
     assert resp.status_code == 400  # Copilot error surfaces honestly, no retry
     assert resp.json()["error"]["code"] == "no_available_model_endpoints"
     assert [c.url.path for c in calls] == ["/v1/messages"]
+
+
+def test_native_responses_stream_records_usage(monkeypatch):
+    """Native /responses passthrough must meter the nested response.completed frame."""
+    client, calls = _make_client(monkeypatch)
+    resp = client.post("/v1/responses", headers=_auth(),
+                       json={"model": "gpt-6-luna", "stream": True, "input": []})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert calls[-1].url.path == "/responses"  # native passthrough, not adapted
+    t = usage.totals()
+    assert t["requests"] >= 1
+    assert t["input_tokens"] >= 7 and t["output_tokens"] >= 3
+    assert abs(t["cost_usd"] - 0.04473525) < 1e-9
+
+
+def test_per_key_routing_uses_pinned_connection(monkeypatch):
+    client, calls = _make_client(monkeypatch)
+    connections.save("alt", "alt-token", "https://alt.example.com")
+    raw = keys.create("pinned")
+    keys.set_connection("pinned", "alt")
+    resp = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw}"},
+                       json={"model": "gpt-5"})
+    assert resp.status_code == 200
+    sent = calls[-1]
+    assert sent.headers["Authorization"] == "Bearer alt-token"
+    assert str(sent.url).startswith("https://alt.example.com/")
+    # an unmapped key follows the active (first) account instead
+    other = keys.create("loose")
+    client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {other}"},
+                json={"model": "gpt-5"})
+    assert calls[-1].headers["Authorization"] == "Bearer gh-token"
+
+
+def test_pinned_key_routing_uses_pinned_catalog(monkeypatch):
+    """A pinned key adapts based on ITS account's catalog, not the active account's."""
+    client, calls = _make_client(monkeypatch)
+    connections.save("alt", "alt-token", "https://alt.example.com")
+    routing.set_cache({"m": ["/chat/completions"]}, label="work")  # active says chat-only
+    routing.set_cache({"m": ["/responses"]}, label="alt")          # pinned says responses-only
+    raw = keys.create("pinned", connection="alt")
+    resp = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw}"},
+                       json={"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    assert calls[-1].url.path == "/responses"  # adapted via the pinned catalog
+    assert str(calls[-1].url).startswith("https://alt.example.com/")
+
+
+def test_native_responses_long_stream_meters_terminal(monkeypatch):
+    """Usage in the terminal frame survives even when the stream exceeds the tap buffer."""
+    connections.save("work", "gh-token")
+    pad = b"x" * (proxy._SSE_CAP + 1000)
+
+    async def long_sse():
+        yield b'data: {"type":"response.output_text.delta","delta":"' + pad + b'"}\n\n'
+        yield (b'data: {"type":"response.completed","response":{"id":"r",'
+               b'"usage":{"input_tokens":7,"output_tokens":3}},'
+               b'"copilot_usage":{"total_nano_aiu":4473525000}}\n\n')
+
+    def handler(request):
+        return httpx.Response(200, content=long_sse(),
+                              headers={"content-type": "text/event-stream"})
+
+    mock = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                             base_url="https://api.githubcopilot.com")
+    monkeypatch.setattr(proxy, "upstream", mock)
+    client = TestClient(proxy.build_app())
+    resp = client.post("/v1/responses", headers=_auth(),
+                       json={"model": "gpt-6-luna", "stream": True, "input": []})
+    assert resp.status_code == 200
+    t = usage.totals()
+    assert t["input_tokens"] >= 7 and t["output_tokens"] >= 3
+    assert abs(t["cost_usd"] - 0.04473525) < 1e-9
+
+
+def test_adapted_reencode_failure_preserves_headers(monkeypatch):
+    """The exception path must still forward rate-limit/retry headers."""
+    connections.save("work", "gh-token")
+
+    def handler(request):
+        return httpx.Response(200, json={"id": "r", "status": "completed", "output": []},
+                              headers={"x-request-id": "req-123",
+                                       "content-type": "application/json"})
+
+    mock = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                             base_url="https://api.githubcopilot.com")
+    monkeypatch.setattr(proxy, "upstream", mock)
+
+    def boom(payload, model):
+        raise ValueError("reencode failed")
+
+    monkeypatch.setattr(adapt, "responses_to_chat_response", boom)
+    routing.set_cache({"gpt-6-luna": ["/responses"]})
+    client = TestClient(proxy.build_app())
+    resp = client.post("/v1/chat/completions", headers=_auth(),
+                       json={"model": "gpt-6-luna", "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    assert resp.headers.get("x-request-id") == "req-123"

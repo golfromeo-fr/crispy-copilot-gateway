@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import httpx
@@ -10,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import adapt, adapt_stream, connections, copilot, keys, usage
+from . import adapt, adapt_stream, connections, copilot, keys, routing, usage
 
 upstream = httpx.AsyncClient(
     base_url=copilot.BASE_URL,
@@ -18,7 +19,7 @@ upstream = httpx.AsyncClient(
 
 _FWD_HEADERS = ("content-type", "retry-after")
 _FWD_PREFIXES = ("x-ratelimit", "x-request-id", "x-github")
-_SSE_CAP = 4_000_000
+_SSE_CAP = 4_000_000  # rolling-tail metering buffer; terminal usage frames always survive
 
 
 def _basic_key_name(header: str) -> str | None:
@@ -49,7 +50,7 @@ def _stream_of(body: bytes) -> bool:
 def _is_fallback_error(content: bytes) -> bool:
     """Copilot advertises /chat/completions but rejects it at request time."""
     try:
-        return (json.loads(content).get("error") or {}).get("code") == adapt.FALLBACK_CODE
+        return (json.loads(content).get("error") or {}).get("code") == routing.FALLBACK_CODE
     except Exception:
         return False
 
@@ -66,9 +67,9 @@ def _record(key_name, model, parsed: dict) -> None:
                      parsed.get("output_tokens"), parsed.get("nano_aiu"))
 
 
-async def fetch_models() -> list[dict]:
-    """Copilot's /models payload via the active connection (token + endpoint)."""
-    conn = connections.active_connection()
+async def fetch_models(conn: dict | None = None) -> list[dict]:
+    """Copilot's /models payload for a connection (default: the active account)."""
+    conn = conn if conn is not None else connections.active_connection()
     if conn is None:
         raise RuntimeError("no GitHub connection - connect a GitHub account in the UI at /ui")
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
@@ -93,25 +94,28 @@ _DROP_HEADERS = ("host", "content-length", "connection", "keep-alive", "transfer
                  "te", "upgrade", "authorization", "x-api-key")
 
 
+def _overlay_client_headers(headers: dict, request: Request) -> None:
+    """Preserve protocol headers the client sent (anthropic-version, OpenAI-Beta, ...);
+    auth and hop-by-hop headers are dropped, Copilot's own are overlaid last."""
+    for key, value in request.headers.items():
+        if key.lower() not in _DROP_HEADERS:
+            headers.setdefault(key, value)
+    headers["Content-Type"] = request.headers.get("content-type", "application/json")
+
+
 async def _forward(request: Request, method: str, path: str) -> Response:
-    conn = connections.active_connection()
+    key_name = getattr(request.state, "proxy_key", None)
+    conn = connections.for_key(key_name)
     if conn is None:
         raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
     github_token = conn["github_token"]
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
     model = _model_of(body)
-    key_name = getattr(request.state, "proxy_key", None)
-    if path == "/chat/completions" and await adapt.upstream_kind(model) == "responses":
-        return await _forward_adapted(request, method, key_name, model, _stream_of(body))
+    if path == "/chat/completions" and await routing.upstream_kind(model, key_name) == "responses":
+        return await _forward_adapted(request, key_name, model, _stream_of(body))
     headers = copilot.upstream_headers(github_token, vision=copilot.has_vision(body))
-    # Preserve protocol headers the client sent (anthropic-version, OpenAI-Beta, ...);
-    # auth and hop-by-hop headers are dropped, Copilot's own are overlaid last.
-    for key, value in request.headers.items():
-        if key.lower() not in _DROP_HEADERS:
-            headers.setdefault(key, value)
-    headers["Content-Type"] = request.headers.get("content-type", "application/json")
-    # TODO (P4): per-key -> connection mapping; every key currently uses the first connection.
+    _overlay_client_headers(headers, request)
     # Absolute url overrides the client base_url, routing to this connection's endpoint.
     req = upstream.build_request(method, base + path, content=body, headers=headers)
     resp = await upstream.send(req, stream=True)
@@ -122,8 +126,9 @@ async def _forward(request: Request, method: str, path: str) -> Response:
 
         async def tap():
             async for chunk in resp.aiter_raw():
-                if len(buf) < _SSE_CAP:
-                    buf.extend(chunk[:_SSE_CAP - len(buf)])
+                buf.extend(chunk)
+                if len(buf) > _SSE_CAP:
+                    del buf[:-_SSE_CAP]  # keep the tail so terminal usage frames survive long streams
                 yield chunk  # byte-identical passthrough; metering never alters the stream
 
         return StreamingResponse(tap(), status_code=resp.status_code, media_type=media_type,
@@ -134,8 +139,8 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     # Copilot sometimes advertises /chat/completions but rejects it at request time
     # (live: mai-code-2-flash, code no_available_model_endpoints); retry once via /responses.
     if (resp.status_code == 400 and path == "/chat/completions" and _is_fallback_error(content)
-            and "/responses" in (adapt.model_endpoints(model) or frozenset())):
-        return await _forward_adapted(request, method, key_name, model, _stream_of(body))
+            and "/responses" in (routing.model_endpoints(model, key_name) or frozenset())):
+        return await _forward_adapted(request, key_name, model, _stream_of(body))
     try:
         _record(key_name, model, usage.parse_usage(json.loads(content)))
     except Exception:
@@ -143,44 +148,54 @@ async def _forward(request: Request, method: str, path: str) -> Response:
     return Response(content=content, status_code=resp.status_code, media_type=media_type, headers=fwd)
 
 
-async def _forward_adapted(request: Request, method: str, key_name: str | None,
-                           model: str | None, stream_requested: bool) -> Response:
-    """Translate the ORIGINAL chat body, forward to /responses, re-encode the reply.
+async def _forward_translated(request: Request, key_name: str | None, model: str | None,
+                              stream_requested: bool, *, translate: Callable[[dict], dict],
+                              reencode: Callable[[dict, str], dict],
+                              sse_translate: Callable[..., AsyncIterator[bytes]]) -> Response:
+    """Translate the ORIGINAL body to /responses, forward, re-encode the reply.
 
-    Never falls back again: a failure here surfaces to the client as-is.
+    Shared by the chat and Anthropic adapted routes. Never falls back again: a
+    failure here surfaces to the client as-is.
     """
-    conn = connections.active_connection()
+    conn = connections.for_key(key_name)
     if conn is None:
         raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()  # cached by Starlette; re-reading is safe
-    chat = json.loads(body)
-    chat["stream"] = bool(stream_requested)  # original stream flag, honored exactly
-    body_out = json.dumps(adapt.chat_to_responses_body(chat)).encode()
+    payload = json.loads(body)
+    payload["stream"] = bool(stream_requested)  # original stream flag, honored exactly
+    body_out = json.dumps(translate(payload)).encode()
     headers = copilot.upstream_headers(conn["github_token"], vision=copilot.has_vision(body))
-    for key, value in request.headers.items():
-        if key.lower() not in _DROP_HEADERS:
-            headers.setdefault(key, value)
-    headers["Content-Type"] = request.headers.get("content-type", "application/json")
-    req = upstream.build_request(method, base + "/responses", content=body_out, headers=headers)
+    _overlay_client_headers(headers, request)
+    req = upstream.build_request("POST", base + "/responses", content=body_out, headers=headers)
     resp = await upstream.send(req, stream=True)
     fwd = _forward_headers(resp)
     media_type = resp.headers.get("content-type")
     if "text/event-stream" in (media_type or ""):
         # Translator consumes frames and meters usage itself; just close upstream after.
         return StreamingResponse(
-            adapt_stream.sse_to_chat(resp.aiter_raw(), key_name=key_name, model=model),
+            sse_translate(resp.aiter_raw(), key_name=key_name, model=model),
             status_code=resp.status_code, media_type=media_type, headers=fwd,
             background=BackgroundTask(resp.aclose))
     content = await resp.aread()
     await resp.aclose()
     try:
-        payload = json.loads(content)
-        _record(key_name, model, usage.parse_usage(payload))
-        return JSONResponse(adapt.responses_to_chat_response(payload, model or ""),
+        parsed = json.loads(content)
+        _record(key_name, model, usage.parse_usage(parsed))
+        return JSONResponse(reencode(parsed, model or ""),
                             status_code=resp.status_code, headers=fwd)
     except Exception:
-        return Response(content=content, status_code=resp.status_code, media_type=media_type)
+        return Response(content=content, status_code=resp.status_code, media_type=media_type,
+                        headers=fwd)
+
+
+async def _forward_adapted(request: Request, key_name: str | None,
+                           model: str | None, stream_requested: bool) -> Response:
+    """Chat-completions body -> /responses -> chat.completion reply."""
+    return await _forward_translated(request, key_name, model, stream_requested,
+                                     translate=adapt.chat_to_responses_body,
+                                     reencode=adapt.responses_to_chat_response,
+                                     sse_translate=adapt_stream.sse_to_chat)
 
 
 async def _forward_messages(request: Request) -> Response:
@@ -193,8 +208,8 @@ async def _forward_messages(request: Request) -> Response:
     body = await request.body()
     model = _model_of(body)
     key_name = getattr(request.state, "proxy_key", None)
-    await adapt._ensure_cache()
-    eps = adapt.model_endpoints(model)
+    await routing.ensure_cache(key_name)
+    eps = routing.model_endpoints(model, key_name)
     if eps is None or "/v1/messages" in eps:
         return await _forward(request, "POST", "/v1/messages")
     if "/responses" in eps:
@@ -204,38 +219,11 @@ async def _forward_messages(request: Request) -> Response:
 
 async def _forward_messages_adapted(request: Request, key_name: str | None,
                                     model: str | None, stream_requested: bool) -> Response:
-    """Translate the ORIGINAL Anthropic body, forward to /responses, re-encode the reply."""
-    conn = connections.active_connection()
-    if conn is None:
-        raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
-    base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
-    body = await request.body()  # cached by Starlette; re-reading is safe
-    chat = json.loads(body)
-    chat["stream"] = bool(stream_requested)  # original stream flag, honored exactly
-    body_out = json.dumps(adapt.messages_to_responses_body(chat)).encode()
-    headers = copilot.upstream_headers(conn["github_token"], vision=copilot.has_vision(body))
-    for key, value in request.headers.items():
-        if key.lower() not in _DROP_HEADERS:
-            headers.setdefault(key, value)
-    headers["Content-Type"] = request.headers.get("content-type", "application/json")
-    req = upstream.build_request("POST", base + "/responses", content=body_out, headers=headers)
-    resp = await upstream.send(req, stream=True)
-    fwd = _forward_headers(resp)
-    media_type = resp.headers.get("content-type")
-    if "text/event-stream" in (media_type or ""):
-        return StreamingResponse(
-            adapt_stream.sse_to_messages(resp.aiter_raw(), key_name=key_name, model=model),
-            status_code=resp.status_code, media_type=media_type, headers=fwd,
-            background=BackgroundTask(resp.aclose))
-    content = await resp.aread()
-    await resp.aclose()
-    try:
-        payload = json.loads(content)
-        _record(key_name, model, usage.parse_usage(payload))
-        return JSONResponse(adapt.responses_to_messages_response(payload, model or ""),
-                            status_code=resp.status_code, headers=fwd)
-    except Exception:
-        return Response(content=content, status_code=resp.status_code, media_type=media_type)
+    """Anthropic messages body -> /responses -> Anthropic message reply."""
+    return await _forward_translated(request, key_name, model, stream_requested,
+                                     translate=adapt.messages_to_responses_body,
+                                     reencode=adapt.responses_to_messages_response,
+                                     sse_translate=adapt_stream.sse_to_messages)
 
 
 def build_app() -> FastAPI:
