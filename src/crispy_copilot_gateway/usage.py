@@ -69,7 +69,11 @@ def parse_usage(obj: dict) -> dict:
     """Token counts (OpenAI or Anthropic naming) plus Copilot nano-AIU billing."""
     if not isinstance(obj, dict):
         return {}
-    usage = obj.get("usage") or {}
+    # Responses SSE frames nest usage under "response", but copilot_usage sits on the
+    # event envelope (sibling of response); non-stream payloads carry both at top level.
+    inner = obj.get("response")
+    src = inner if isinstance(inner, dict) else obj
+    usage = src.get("usage") or {}
     out = {}
     input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
     output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
@@ -77,7 +81,8 @@ def parse_usage(obj: dict) -> dict:
         out["input_tokens"] = input_tokens
     if output_tokens is not None:
         out["output_tokens"] = output_tokens
-    nano = (obj.get("copilot_usage") or {}).get("total_nano_aiu")
+    copilot = obj.get("copilot_usage") or src.get("copilot_usage") or {}
+    nano = copilot.get("total_nano_aiu")
     if nano is not None:
         out["nano_aiu"] = nano
     return out

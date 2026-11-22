@@ -1,50 +1,15 @@
-"""Chat-completions -> Responses API adaptation for /responses-only Copilot models."""
+"""Body translators: OpenAI chat / Anthropic messages <-> Copilot Responses API.
+
+Endpoint-cache and routing policy live in routing.py; the names are re-exported
+here for callers that historically imported them from adapt.
+"""
 from __future__ import annotations
 
 import json
 import time
 
-MODELS_TTL = 600  # seconds before the supported_endpoints cache refreshes
-FALLBACK_CODE = "no_available_model_endpoints"  # Copilot rejects an advertised endpoint
-
-_cache: dict = {"endpoints": {}, "fetched_at": 0.0}  # model_id -> frozenset(endpoints)
-
-
-def set_cache(endpoints: dict) -> None:
-    """Test hook: inject model endpoints without network and mark the cache fresh."""
-    _cache["endpoints"] = {mid: frozenset(eps or []) for mid, eps in endpoints.items()}
-    _cache["fetched_at"] = time.time()
-
-
-async def _ensure_cache() -> None:
-    """Refresh the supported_endpoints cache when stale; failures fail open."""
-    if time.time() - _cache["fetched_at"] <= MODELS_TTL:
-        return
-    from . import proxy  # circular-import safety
-    try:
-        models = await proxy.fetch_models()
-        _cache["endpoints"] = {m.get("id"): frozenset(m.get("supported_endpoints") or [])
-                               for m in models if isinstance(m, dict)}
-    except Exception:
-        pass  # fail open; retry after TTL
-    _cache["fetched_at"] = time.time()
-
-
-def model_endpoints(model: str | None) -> frozenset | None:
-    """Cached endpoint set for the model WITHOUT refreshing; None when unknown."""
-    return _cache["endpoints"].get(model or "")
-
-
-async def upstream_kind(model: str | None) -> str:
-    """'responses' only when the model lists /responses and not /chat/completions.
-
-    Unknown models or fetch failures fail open to 'chat' (passthrough).
-    """
-    await _ensure_cache()
-    eps = model_endpoints(model)
-    if eps is not None and "/responses" in eps and "/chat/completions" not in eps:
-        return "responses"
-    return "chat"
+from .routing import (FALLBACK_CODE, MODELS_TTL, ensure_cache,  # noqa: F401 (re-export)
+                      model_endpoints, set_cache, upstream_kind)
 
 
 def _text_of(content) -> str:
@@ -69,6 +34,54 @@ def _user_parts(content) -> list[dict]:
             url = p.get("image_url")
             url = url.get("url") if isinstance(url, dict) else url
             parts.append({"type": "input_image", "image_url": url})
+    return parts
+
+
+def _chat_tool_parts(content) -> list[dict]:
+    """OpenAI chat tool-result content as Responses input parts (text + images)."""
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}] if content else []
+    parts: list[dict] = []
+    for p in content or []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            parts.append({"type": "input_text", "text": p.get("text", "")})
+        elif p.get("type") == "image_url":
+            url = p.get("image_url")
+            url = url.get("url") if isinstance(url, dict) else url
+            parts.append({"type": "input_image", "image_url": url})
+    return parts
+
+
+def _anthropic_tool_parts(content) -> list[dict]:
+    """Anthropic tool_result content as Responses input parts (text + images)."""
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}] if content else []
+    parts: list[dict] = []
+    for b in content or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "text":
+            parts.append({"type": "input_text", "text": b.get("text", "")})
+        elif b.get("type") == "image":
+            src = b.get("source") or {}
+            parts.append({"type": "input_image", "image_url":
+                          f"data:{src.get('media_type', 'application/octet-stream')};"
+                          f"base64,{src.get('data', '')}"})
+    return parts
+
+
+def _tool_output(parts: list[dict], is_error: bool = False) -> str | list:
+    """Responses function_call_output output: string for text-only (widest compatibility),
+    input parts list when images are present (Copilot accepts both, live-verified).
+
+    Responses has no is_error field, so an errored result is prefixed to keep the signal.
+    """
+    if is_error:
+        parts = [{"type": "input_text", "text": "[tool error]"}] + parts
+    if not any(p.get("type") == "input_image" for p in parts):
+        return "\n".join(p.get("text", "") for p in parts if p.get("type") == "input_text")
     return parts
 
 
@@ -98,7 +111,7 @@ def chat_to_responses_body(body: dict) -> dict:
                                     "name": fn.get("name"), "arguments": fn.get("arguments")})
         elif role == "tool":
             input_items.append({"type": "function_call_output", "call_id": m.get("tool_call_id"),
-                                "output": _text_of(content)})
+                                "output": _tool_output(_chat_tool_parts(content))})
     if instructions:
         out["instructions"] = "\n\n".join(instructions)
     out["input"] = input_items
@@ -124,6 +137,8 @@ def chat_to_responses_body(body: dict) -> dict:
         out["tool_choice"] = choice
     elif isinstance(choice, dict) and (choice.get("function") or {}).get("name"):
         out["tool_choice"] = {"type": "function", "name": choice["function"]["name"]}
+    if "parallel_tool_calls" in body:
+        out["parallel_tool_calls"] = body["parallel_tool_calls"]
     if isinstance(body.get("response_format"), dict):
         out["text"] = {"format": body["response_format"]}
     return out
@@ -192,7 +207,8 @@ def messages_to_responses_body(body: dict) -> dict:
                         pending = []
                     input_items.append({"type": "function_call_output",
                                         "call_id": block.get("tool_use_id"),
-                                        "output": _text_of(block.get("content"))})
+                                        "output": _tool_output(_anthropic_tool_parts(block.get("content")),
+                                                               bool(block.get("is_error")))})
             if pending:
                 input_items.append({"role": "user", "content": pending})
         elif role == "assistant":
@@ -233,8 +249,16 @@ def messages_to_responses_body(body: dict) -> dict:
     choice = body.get("tool_choice")
     if isinstance(choice, str):
         out["tool_choice"] = "required" if choice == "any" else choice
-    elif isinstance(choice, dict) and choice.get("type") == "tool" and choice.get("name"):
-        out["tool_choice"] = {"type": "function", "name": choice["name"]}
+    elif isinstance(choice, dict):
+        ctype = choice.get("type")
+        if ctype == "tool" and choice.get("name"):
+            out["tool_choice"] = {"type": "function", "name": choice["name"]}
+        elif ctype == "any":
+            out["tool_choice"] = "required"
+        elif ctype in ("auto", "none"):
+            out["tool_choice"] = ctype
+        if choice.get("disable_parallel_tool_use"):
+            out["parallel_tool_calls"] = False
     # stop_sequences / top_k / metadata have no Responses equivalent and are dropped.
     return out
 

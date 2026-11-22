@@ -34,3 +34,24 @@ def test_parse_usage_openai_and_anthropic_shapes():
     assert usage.parse_usage({}) == {}
     assert usage.parse_usage({"copilot_usage": {"total_nano_aiu": 1000000000}}) == {
         "nano_aiu": 1000000000}
+
+
+def test_parse_sse_responses_nested_envelope():
+    """Live shape: usage nested under response, copilot_usage on the event envelope."""
+    buf = (b'data: {"type":"response.created","response":{"usage":{"input_tokens":7}}}\n\n'
+           b'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3}},'
+           b'"copilot_usage":{"total_nano_aiu":4473525000}}\n\n')
+    assert usage.parse_sse(buf) == {"input_tokens": 7, "output_tokens": 3, "nano_aiu": 4473525000}
+
+
+def test_parse_usage_unwraps_response_envelope():
+    # copilot_usage inside response (fallback) ...
+    assert usage.parse_usage({"type": "response.completed", "response": {
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+        "copilot_usage": {"total_nano_aiu": 5}}}) == {
+            "input_tokens": 2, "output_tokens": 1, "nano_aiu": 5}
+    # ... and on the envelope (the live native-/responses shape).
+    assert usage.parse_usage({"type": "response.completed",
+        "response": {"usage": {"input_tokens": 2, "output_tokens": 1}},
+        "copilot_usage": {"total_nano_aiu": 5}}) == {
+            "input_tokens": 2, "output_tokens": 1, "nano_aiu": 5}
