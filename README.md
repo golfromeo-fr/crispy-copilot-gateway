@@ -1,13 +1,13 @@
 # crispy-copilot-gateway
 
-Local API gateway for GitHub Copilot - universal Anthropic/OpenAI endpoints for any harness, with a management UI and credits metering. Status: P1 + P3 built and unit-tested; live Copilot verification pending.
+Local API gateway for GitHub Copilot - universal Anthropic/OpenAI endpoints for any harness, with a management UI and credits metering. Status: P1-P4 built, unit-tested, and live-verified against Copilot.
 
 ## How it works
 
 - GitHub OAuth device flow runs once in the browser; the long-lived GitHub token is stored in a 0600 file.
 - The gateway sends that GitHub token directly as the Copilot bearer (opencode-compatible; no token exchange) and mimics opencode's client fingerprint.
 - Per-harness proxy keys: named, revocable, sha256-hashed at rest; the raw key is shown once.
-- SSE streams pass through byte-identical; a best-effort tap records Copilot credits (`copilot_usage.total_nano_aiu`) to a local SQLite store.
+- Native routes pass SSE through byte-identical; models served only via `/responses` are adapted (chat/Anthropic <-> Responses) and re-encoded. A best-effort tap records Copilot credits (`copilot_usage.total_nano_aiu`) to a local SQLite store.
 
 ## Endpoints
 
@@ -15,7 +15,7 @@ Local API gateway for GitHub Copilot - universal Anthropic/OpenAI endpoints for 
 | --- | --- | --- |
 | `/v1/chat/completions` | OpenAI chat | ZCode, opencode, most tools |
 | `/v1/responses` | OpenAI Responses | Codex, newer clients |
-| `/v1/messages` | Anthropic Messages | Claude Code (P2) |
+| `/v1/messages` | Anthropic Messages | Claude Code, ZCode |
 | `/v1/models` | OpenAI model list | all |
 
 ## Quickstart
@@ -50,9 +50,9 @@ reply plus usage. The UI usage card and `usage.db` record the credits for each r
 ## Phases
 
 - P1 (done): core proxy - device flow, direct-bearer OpenAI passthrough, per-connection endpoint routing.
+- P2 (done): Anthropic `/v1/messages` route + chat/Anthropic <-> Responses adaptation for `/responses`-only models.
 - P3 (done): NiceGUI management UI + Copilot credits metering.
-- P2: Anthropic `/v1/messages` route (Claude Code).
-- P4: multi-account - per-key connection mapping.
+- P4 (done): multi-account - per-key connection mapping (each proxy key can pin a GitHub account; unpinned keys follow the active account).
 
 ## License
 
