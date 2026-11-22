@@ -26,12 +26,6 @@ def card() -> None:
     state["count_label"] = count_label
 
 
-def _copy(text: str) -> None:
-    from . import ui_common
-
-    ui_common.copy_text(text)
-
-
 def _copy_all(ids: list[str]) -> None:
     from nicegui import ui
 
@@ -86,7 +80,7 @@ def _render(rows, state, models: list[dict] | None = None, error: str | None = N
                     ui.badge("disabled", color="grey")
                 eps = m.get("supported_endpoints") or []
                 ui.label(", ".join(eps) if eps else "chat (default)").classes("text-xs opacity-50")
-                ui.button(icon="content_copy", on_click=lambda mid=mid: _copy(mid)).props("flat dense")
+                ui.button(icon="content_copy", on_click=lambda mid=mid: ui_common.copy_text(mid)).props("flat dense")
         if shown:
             ui.label("one id per line - paste into your harness provider config").classes("opacity-60")
     state["ids"] = ids

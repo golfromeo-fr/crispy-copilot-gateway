@@ -31,13 +31,20 @@ def _save(keys: list[dict]) -> None:
     config.write_private(config.keys_path(), json.dumps(keys, indent=2))
 
 
-def create(name: str) -> str:
-    """Create a per-harness key; returns the raw secret, which is shown once."""
+def create(name: str, connection: str | None = None) -> str:
+    """Create a per-harness key; returns the raw secret, which is shown once.
+
+    `connection` optionally pins the key to a GitHub account label (P4); unset
+    keys follow the active account.
+    """
     keys = _load()
     if any(entry["name"] == name for entry in keys):
         raise ValueError(f"proxy key name already exists: {name}")
     raw = _PREFIX + secrets.token_urlsafe(32)
-    keys.append({"name": name, "key_hash": _hash(raw), "created_at": _now(), "last_used": None})
+    entry = {"name": name, "key_hash": _hash(raw), "created_at": _now(), "last_used": None}
+    if connection:
+        entry["connection"] = connection
+    keys.append(entry)
     _save(keys)
     return raw
 
@@ -84,6 +91,29 @@ def revoke(name: str) -> bool:
 def list_keys() -> list[dict]:
     """Key metadata without hashes, for the management UI."""
     return [
-        {"name": entry["name"], "created_at": entry["created_at"], "last_used": entry["last_used"]}
+        {"name": entry["name"], "created_at": entry["created_at"], "last_used": entry["last_used"],
+         "connection": entry.get("connection")}
         for entry in _load()
     ]
+
+
+def set_connection(name: str, label: str | None) -> bool:
+    """Pin a key to a connection label (None = follow the active account); False if no such key."""
+    keys = _load()
+    for entry in keys:
+        if entry["name"] == name:
+            if label:
+                entry["connection"] = label
+            else:
+                entry.pop("connection", None)
+            _save(keys)
+            return True
+    return False
+
+
+def connection_of(name: str) -> str | None:
+    """The connection label pinned to a key, or None when it follows the active account."""
+    for entry in _load():
+        if entry["name"] == name:
+            return entry.get("connection")
+    return None

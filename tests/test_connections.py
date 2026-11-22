@@ -128,3 +128,36 @@ def test_effective_active_label_prefers_selection_then_first():
     assert connections.effective_active_label() == "personal"
     connections.remove("personal")
     assert connections.effective_active_label() == "work"  # stale selection ignored
+
+
+def test_for_key_uses_pinned_label():
+    from crispy_copilot_gateway import keys
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("work")
+    raw = keys.create("harness", connection="personal")
+    assert connections.for_key("harness")["github_token"] == "tok-b"
+
+
+def test_for_key_falls_back_to_active_when_unmapped():
+    from crispy_copilot_gateway import keys
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("personal")
+    keys.create("harness")
+    assert connections.for_key("harness")["github_token"] == "tok-b"
+    assert connections.for_key(None)["github_token"] == "tok-b"
+
+
+def test_for_key_falls_back_when_pin_stale():
+    from crispy_copilot_gateway import keys
+    connections.save("work", "tok-a")
+    connections.save("personal", "tok-b")
+    connections.set_active("work")
+    keys.create("harness", connection="personal")
+    connections.remove("personal")
+    assert connections.for_key("harness")["github_token"] == "tok-a"
+
+
+def test_for_key_none_when_empty():
+    assert connections.for_key("anything") is None

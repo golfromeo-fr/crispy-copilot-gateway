@@ -72,16 +72,30 @@ def _render_keys(container) -> None:
     container.clear()
     with container:
         records = keys.list_keys()
+        labels = list(connections.load_all().keys())
+        options = {"": "Active account", **{lbl: lbl for lbl in labels}}
         if not records:
             ui.label("No proxy keys yet - create one for each harness.").classes("opacity-60")
         for record in records:
             name = record["name"]
+            pinned = record.get("connection")
             with ui.row().classes("items-center"):
                 ui.label(f"{name}  created={record['created_at']}  "
                          f"last_used={record['last_used'] or 'never'}")
+                ui.select(options, value=pinned if pinned in labels else "", label="Account",
+                          on_change=lambda e, n=name: _assign(container, n, e.value)).props(
+                              "dense outlined").classes("min-w-40")
                 ui.button("Revoke", on_click=lambda n=name: ui_common.confirm(
                     "Revoke key?", f"Harnesses using '{n}' will stop working until you create a new key.",
                     "Revoke", lambda n=n: _revoke(container, n)))
+
+
+def _assign(container, name: str, label: str) -> None:
+    from nicegui import ui
+
+    keys.set_connection(name, label or None)
+    ui.notify(f"'{name}' routes to {label or 'the active account'}.", type="positive")
+    _render_keys(container)
 
 
 def _revoke(container, name: str) -> None:

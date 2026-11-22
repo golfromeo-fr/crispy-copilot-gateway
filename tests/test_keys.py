@@ -41,7 +41,7 @@ def test_list_keys_exposes_no_hashes():
     keys.create("zcode")
     listing = keys.list_keys()
     assert listing and "key_hash" not in listing[0]
-    assert set(listing[0]) == {"name", "created_at", "last_used"}
+    assert set(listing[0]) == {"name", "created_at", "last_used", "connection"}
 
 
 def test_last_used_write_is_throttled():
@@ -51,3 +51,29 @@ def test_last_used_write_is_throttled():
     keys.verify(raw)  # immediate second use within the 60s window
     second = next(r for r in keys.list_keys() if r["name"] == "zcode")["last_used"]
     assert second == first
+
+
+def test_create_with_connection_pin():
+    keys.create("zcode", connection="work")
+    assert keys.connection_of("zcode") == "work"
+    assert next(r for r in keys.list_keys() if r["name"] == "zcode")["connection"] == "work"
+
+
+def test_set_connection_roundtrip_and_clear():
+    keys.create("zcode")
+    assert keys.connection_of("zcode") is None
+    assert keys.set_connection("zcode", "work") is True
+    assert keys.connection_of("zcode") == "work"
+    assert keys.set_connection("zcode", None) is True
+    assert keys.connection_of("zcode") is None
+
+
+def test_set_connection_unknown_key_returns_false():
+    assert keys.set_connection("ghost", "work") is False
+    assert keys.connection_of("ghost") is None
+
+
+def test_connection_pin_survives_last_used_stamp():
+    raw = keys.create("zcode", connection="work")
+    keys.verify(raw)  # stamps last_used and re-saves the entry
+    assert keys.connection_of("zcode") == "work"

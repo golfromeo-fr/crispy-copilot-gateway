@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from . import config, copilot
+from . import config, copilot, keys
 
 # Default: opencode's registered Copilot OAuth client ID (from
 # /home/gr/opencode/packages/core/src/plugin/provider/github-copilot.ts). Using it
@@ -130,6 +130,26 @@ def active_connection() -> dict | None:
 def first_token() -> str | None:
     entry = active_connection()
     return entry["github_token"] if entry else None
+
+
+def for_key(key_name: str | None) -> dict | None:
+    """Connection a proxy key routes to (P4): its pinned label, else the active account.
+
+    A stale pin (account removed) falls back to the active account rather than failing.
+    """
+    label = keys.connection_of(key_name) if key_name else None
+    stored = load_all()
+    if label and label in stored:
+        return stored[label]
+    return active_connection()
+
+
+def label_for_key(key_name: str | None) -> str | None:
+    """Effective connection label for a key: its pin if present, else the active label."""
+    label = keys.connection_of(key_name) if key_name else None
+    if label and label in load_all():
+        return label
+    return effective_active_label()
 
 
 def remove(label: str) -> bool:
