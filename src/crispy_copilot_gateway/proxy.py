@@ -103,11 +103,17 @@ def _overlay_client_headers(headers: dict, request: Request) -> None:
     headers["Content-Type"] = request.headers.get("content-type", "application/json")
 
 
-async def _forward(request: Request, method: str, path: str) -> Response:
-    key_name = getattr(request.state, "proxy_key", None)
+def _require_connection(key_name: str | None) -> dict:
+    """The connection a key routes to, or a 503 telling the user to connect an account."""
     conn = connections.for_key(key_name)
     if conn is None:
         raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
+    return conn
+
+
+async def _forward(request: Request, method: str, path: str) -> Response:
+    key_name = getattr(request.state, "proxy_key", None)
+    conn = _require_connection(key_name)
     github_token = conn["github_token"]
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()
@@ -157,9 +163,7 @@ async def _forward_translated(request: Request, key_name: str | None, model: str
     Shared by the chat and Anthropic adapted routes. Never falls back again: a
     failure here surfaces to the client as-is.
     """
-    conn = connections.for_key(key_name)
-    if conn is None:
-        raise HTTPException(503, "no GitHub connection - connect a GitHub account in the UI at /ui")
+    conn = _require_connection(key_name)
     base = (conn.get("api_endpoint") or copilot.BASE_URL).rstrip("/")
     body = await request.body()  # cached by Starlette; re-reading is safe
     payload = json.loads(body)
@@ -179,14 +183,24 @@ async def _forward_translated(request: Request, key_name: str | None, model: str
             background=BackgroundTask(resp.aclose))
     content = await resp.aread()
     await resp.aclose()
+    raw = Response(content=content, status_code=resp.status_code, media_type=media_type, headers=fwd)
     try:
         parsed = json.loads(content)
+    except Exception:
+        return raw
+    try:
         _record(key_name, model, usage.parse_usage(parsed))
+    except Exception:
+        pass  # metering is best-effort
+    # Upstream errors must surface as errors, not be re-encoded into a success-shaped
+    # chat.completion/message body that would hide the failure from the harness.
+    if resp.status_code >= 400 or (isinstance(parsed, dict) and "error" in parsed):
+        return raw
+    try:
         return JSONResponse(reencode(parsed, model or ""),
                             status_code=resp.status_code, headers=fwd)
     except Exception:
-        return Response(content=content, status_code=resp.status_code, media_type=media_type,
-                        headers=fwd)
+        return raw  # a re-encode failure still forwards the upstream body + headers
 
 
 async def _forward_adapted(request: Request, key_name: str | None,

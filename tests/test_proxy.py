@@ -404,3 +404,28 @@ def test_adapted_reencode_failure_preserves_headers(monkeypatch):
                        json={"model": "gpt-6-luna", "messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 200
     assert resp.headers.get("x-request-id") == "req-123"
+
+
+@pytest.mark.parametrize("route,payload,success_key", [
+    ("/v1/chat/completions", {"model": "gpt-6-luna", "messages": [{"role": "user", "content": "hi"}]}, "choices"),
+    ("/v1/messages", {"model": "gpt-6-luna", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}, "content"),
+])
+def test_adapted_upstream_error_passes_through(monkeypatch, route, payload, success_key):
+    """A 4xx from an adapted route surfaces as the raw error, not a success-shaped body."""
+    connections.save("work", "gh-token")
+
+    def handler(request):
+        return httpx.Response(400, json={"error": {"message": "bad request", "code": "invalid"}},
+                              headers={"content-type": "application/json", "x-request-id": "req-9"})
+
+    mock = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                             base_url="https://api.githubcopilot.com")
+    monkeypatch.setattr(proxy, "upstream", mock)
+    routing.set_cache({"gpt-6-luna": ["/responses"]})
+    client = TestClient(proxy.build_app())
+    resp = client.post(route, headers=_auth(), json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid"
+    assert success_key not in body  # not re-encoded into a success shape
+    assert resp.headers.get("x-request-id") == "req-9"

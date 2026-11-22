@@ -55,3 +55,17 @@ def test_parse_usage_unwraps_response_envelope():
         "response": {"usage": {"input_tokens": 2, "output_tokens": 1}},
         "copilot_usage": {"total_nano_aiu": 5}}) == {
             "input_tokens": 2, "output_tokens": 1, "nano_aiu": 5}
+
+
+def test_parse_usage_anthropic_message_start():
+    """Anthropic message_start nests usage under message - input_tokens must survive."""
+    assert usage.parse_usage({"type": "message_start", "message": {
+        "usage": {"input_tokens": 384, "output_tokens": 0}}}) == {
+            "input_tokens": 384, "output_tokens": 0}
+
+
+def test_parse_sse_native_anthropic_full_usage():
+    buf = (b'data: {"type":"message_start","message":{"usage":{"input_tokens":384,"output_tokens":0}}}\n\n'
+           b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":52},"copilot_usage":{"total_nano_aiu":6440000}}\n\n'
+           b'data: {"type":"message_stop"}\n\n')
+    assert usage.parse_sse(buf) == {"input_tokens": 384, "output_tokens": 52, "nano_aiu": 6440000}

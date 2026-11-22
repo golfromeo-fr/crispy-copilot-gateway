@@ -32,14 +32,6 @@ def record(key_name, model, input_tokens, output_tokens, nano_aiu) -> None:
         conn.close()
 
 
-def init() -> None:
-    conn = _connect()
-    try:
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def totals() -> dict:
     conn = _connect()
     try:
@@ -69,11 +61,13 @@ def parse_usage(obj: dict) -> dict:
     """Token counts (OpenAI or Anthropic naming) plus Copilot nano-AIU billing."""
     if not isinstance(obj, dict):
         return {}
-    # Responses SSE frames nest usage under "response", but copilot_usage sits on the
-    # event envelope (sibling of response); non-stream payloads carry both at top level.
+    # Usage nests under "response" (Responses SSE) or "message" (Anthropic message_start);
+    # copilot_usage sits on the event envelope. Other payloads carry usage at top level.
     inner = obj.get("response")
+    if not isinstance(inner, dict):
+        inner = obj.get("message")
     src = inner if isinstance(inner, dict) else obj
-    usage = src.get("usage") or {}
+    usage = src.get("usage") or obj.get("usage") or {}
     out = {}
     input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
     output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
