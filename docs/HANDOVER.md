@@ -8,7 +8,7 @@ SHAs and versions — re-verify anything that looks stale.
 - Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway`, last code commit
   `1562113` (0.1.1); docs-only commits after it
 - Wrapper plugin: `golfromeo-fr/zcode-toolbox`, `plugins/copilot-gateway`
-  v0.2.3 @ `d0d593a` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
+  v0.2.4 @ `d1442fc` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
 ## Part A — the gateway (this repo)
@@ -149,11 +149,16 @@ swallows its errors, so nothing in the view relies on either.
 
 ### Login when no browser opens here (VMs, remote desktops)
 
-The device page address never changes: `https://github.com/login/device`. The
-device flow does not care which machine the browser is on. When
-`openedInBrowser` is false or the clipboard is not shared, type the address by
-hand in any browser signed in to that GitHub account (phone, host, another
-computer) and type the code shown in the view. Codes expire after ~15 minutes:
+The address to enter the code is whatever GitHub returns with it
+(`verification_uri`): `https://github.com/login/device` for github.com as
+observed on 2026-11-23 and shown in GitHub's docs, which is an observation, not
+a guarantee, and there is no pre-filled link in the response. The plugin does
+not assume it: the view shows only the address that came with the code, and
+nothing opens a guessed address. The device flow does not care which machine
+the browser is on. When `openedInBrowser` is false or the clipboard is not
+shared, type the address shown in the view by hand in any browser signed in to
+that GitHub account (phone, host, another computer) and type the code. Codes
+expire after ~15 minutes:
 start a new login instead of retrying an old one. Terminal fallback on the
 machine itself (the env var is what keeps the token in the plugin's store):
 
@@ -162,6 +167,9 @@ machine itself (the env var is what keeps the token in the plugin's store):
 
 Verified: a running gateway serves the new account without a restart (503 →
 upstream auth response as soon as `connections.json` appears).
+
+The gateway's device-flow and token endpoints are fixed to github.com
+(`connections.py`): it cannot sign in to a GitHub Enterprise Server host.
 
 ### Windows gotchas — ALL fixed; keep them fixed
 
@@ -184,7 +192,9 @@ Bump `plugins/copilot-gateway/.zcode-plugin/plugin.json` version AND
 marketplace and toggle off/on (loader shim re-imports impl with a cache
 buster). `release-plugin.sh` / `sync-plugin.sh` exist for releases.
 Release rule: bump the manifest AND marketplace version in a sequence that
-halts on failure, and read both back from disk before pushing. The 0.2.2 bump
+halts on failure, stage both files, and after pushing read both back from the
+pushed commit (`git show origin/main:<file>`), not from the working tree. The
+0.2.4 bump first went out with the marketplace entry left unstaged. The 0.2.2 bump
 was skipped by a script that stopped earlier while the commit and push went
 on: the idle-exit code shipped labelled 0.2.1, so no instance was offered it.
 
@@ -201,7 +211,8 @@ openers on PATH for the browser-open result.
 Plugin releases since 0.2.0: 0.2.1 sticky copy bar (its sticky button had no
 click handler until 0.2.3); **0.2.2 was never published as a version** (the
 idle-exit code is in toolbox `91a5d4a`, but the bump was skipped, see above);
-0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code).
+0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code);
+0.2.4 (the plugin no longer assumes the device address).
 
 **Home Linux box** (re-verified 2026-11-23): standalone gateway serving
 `:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
@@ -218,12 +229,13 @@ via the wrapper, account connected (device flow), credits metering observed
 (6 req), ZCode wired by pasting the provider JSON into a chat. After
 updating to 0.2.0 the migration should preserve the account.
 
-**Work Linux box** (2026-11-23): ZCode with the plugin under test. No browser
-could be opened from that session and the view text could not be copied out,
-so the GitHub login has to be done by typing the device address in a browser
-elsewhere (plugin 0.2.3 shows address and code as typeable text and explains
-expired or failed attempts). Whether the login completed there has not been
-reported back.
+**Work Linux box** (2026-11-23): ZCode with the plugin under test. The user
+could not open the GitHub link from that session and could not copy the view
+text out. My advice to type `github.com/login/device` by hand in another
+browser was rejected as wrong the same day; the cause was not established when
+this was written. Plugin 0.2.3/0.2.4 show the address and code as typeable
+text (only the address GitHub returned with the code) and explain expired or
+failed attempts.
 
 ## Part D — open/optional items
 
