@@ -5,9 +5,10 @@ repo) or its ZCode wrapper plugin. Written 2026-11-23; facts pinned to commit
 SHAs and versions — re-verify anything that looks stale.
 
 **Repos**
-- Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway` @ `046e754`
+- Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway`, last code commit
+  `1562113` (0.1.1); docs-only commits after it
 - Wrapper plugin: `golfromeo-fr/zcode-toolbox`, `plugins/copilot-gateway`
-  v0.2.0 @ `2a2b2dd` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
+  v0.2.3 @ `d0d593a` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
 ## Part A — the gateway (this repo)
@@ -17,6 +18,7 @@ Local API gateway for GitHub Copilot. Serves on `127.0.0.1:8812` (default):
 | Path | Speaks | Auth |
 |---|---|---|
 | `/healthz` | `{"ok":true}` | none (only unauth endpoint) |
+| `serve --idle-exit MIN` | graceful shutdown after MIN minutes without any request (0 = never, the CLI default) | — |
 | `/v1/chat/completions`, `/v1/responses` | OpenAI | Bearer `ck_` key |
 | `/v1/messages`, `/v1/messages/count_tokens` | Anthropic | Bearer or x-api-key |
 | `/v1/models` | Copilot catalog (raw upstream entries) | Bearer `ck_` key |
@@ -115,8 +117,10 @@ env. The gateway additionally respects `CRISPY_COPILOT_DATA_DIR`.
 ### MCP tools (13) — `mcp__plugin_copilot-gateway_gateway__<name>`
 
 status · start · stop · update · login / login_check (device flow:
-`gateway_login {label}` returns code+url and opens the system browser;
-`login_check` until `connected`) · keys · key_create / key_revoke / key_pin ·
+`gateway_login {label}` returns code+url and `openedInBrowser`, true only
+when an opener really launched a browser; `login_check` phases:
+`awaiting-authorization` pending · `connected` · `expired` (codes live ~15
+min: start again) · `failed` (see `logTail`)) · keys · key_create / key_revoke / key_pin ·
 **config** (provider config for an EXISTING key; apiKey = placeholder; reads
 the catalog via a throwaway `<key>-catalog-tmp` key, revoked immediately;
 stale temp keys cleaned) · **use** (first-time: create key, raw shown ONCE) ·
@@ -134,11 +138,30 @@ streaming, context/output/prompt limits, per-M in/out prices.
 
 Composer chip `gw <latency>ms` / `gw down` (tooltip: accounts★/keys/credits/$);
 click opens the side pane. View cards: start/stop button (+ per-state down
-hints), Connect GitHub account (login…, click-to-copy code), Accounts,
+hints), Connect GitHub account (login…: address + code as plain text, copy
+buttons that report success), Accounts,
 Pending logins, Proxy keys (pin select + revoke), Copilot credits (totals +
 recent), Harness config (**config…** regenerate for existing key ·
 **new key…** first-time · **copy** to clipboard), update…. The `updated`
 line shows the bound bridge global (`· bridge zcode|host`) for debugging.
+Links do not open from inside the view, and the bridge's own link call
+swallows its errors, so nothing in the view relies on either.
+
+### Login when no browser opens here (VMs, remote desktops)
+
+The device page address never changes: `https://github.com/login/device`. The
+device flow does not care which machine the browser is on. When
+`openedInBrowser` is false or the clipboard is not shared, type the address by
+hand in any browser signed in to that GitHub account (phone, host, another
+computer) and type the code shown in the view. Codes expire after ~15 minutes:
+start a new login instead of retrying an old one. Terminal fallback on the
+machine itself (the env var is what keeps the token in the plugin's store):
+
+    CRISPY_COPILOT_DATA_DIR=~/.zcode/plugin-data/copilot-gateway/store \
+      ~/.zcode/plugin-data/copilot-gateway/gateway/.venv/bin/crispy-copilot login <label>
+
+Verified: a running gateway serves the new account without a restart (503 →
+upstream auth response as soon as `connections.json` appears).
 
 ### Windows gotchas — ALL fixed; keep them fixed
 
@@ -160,19 +183,32 @@ Bump `plugins/copilot-gateway/.zcode-plugin/plugin.json` version AND
 `marketplace.json` entry together; commit + push; instances update via the
 marketplace and toggle off/on (loader shim re-imports impl with a cache
 buster). `release-plugin.sh` / `sync-plugin.sh` exist for releases.
+Release rule: bump the manifest AND marketplace version in a sequence that
+halts on failure, and read both back from disk before pushing. The 0.2.2 bump
+was skipped by a script that stopped earlier while the commit and push went
+on: the idle-exit code shipped labelled 0.2.1, so no instance was offered it.
+
 Verification patterns that caught real bugs: runtime view smoke
-(browser-faithful stubs, zcode-only bridge — `node --check` alone is NOT
-enough), isolated-port lifecycle tests (:8813-:8825 used so far), temp-key
-create/revoke for catalog reads, planted-legacy-store migration test.
+`node tools/smoke-copilot-gateway-view.mjs` in the toolbox (runs the real view
+script under browser-faithful stubs with a zcode-only bridge, drives the click
+and refresh paths, fails on duplicate element ids — `node --check` alone is
+NOT enough), isolated-port lifecycle tests (:8813-:8828 used so far), temp-key
+create/revoke for catalog reads, planted-legacy-store migration test, fake
+openers on PATH for the browser-open result.
 
 ## Part C — machine states (as of 2026-11-23)
 
+Plugin releases since 0.2.0: 0.2.1 sticky copy bar (its sticky button had no
+click handler until 0.2.3); **0.2.2 was never published as a version** (the
+idle-exit code is in toolbox `91a5d4a`, but the bump was skipped, see above);
+0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code).
+
 **Home Linux box** (re-verified 2026-11-23): standalone gateway serving
 `:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
-keys + credit history intact — plugin work never touched it; 130 unit tests
-pass). The plugin is deployed at `~/.zcode/plugins/copilot-gateway`
-(0.2.0-era code: `plugin-data` runtime default + migration present) but NOT
-installed in that ZCode instance. The runtime dir
+keys + credit history intact — plugin work never touched it; 132 unit tests
+pass). A copy of the plugin sits at `~/.zcode/plugins/copilot-gateway` (code
+as of toolbox `91a5d4a`, labelled 0.2.1, not updated since) but is NOT
+installed in that ZCode instance; test machines update from GitHub. The runtime dir
 `~/.zcode/plugin-data/copilot-gateway` is **absent**, and no legacy in-plugin
 store remains — earlier "install + `zcode` key, no account" state is gone.
 First `gateway_start` here = fresh clone + venv + `login` from scratch.
@@ -182,10 +218,17 @@ via the wrapper, account connected (device flow), credits metering observed
 (6 req), ZCode wired by pasting the provider JSON into a chat. After
 updating to 0.2.0 the migration should preserve the account.
 
+**Work Linux box** (2026-11-23): ZCode with the plugin under test. No browser
+could be opened from that session and the view text could not be copied out,
+so the GitHub login has to be done by typing the device address in a browser
+elsewhere (plugin 0.2.3 shows address and code as typeable text and explains
+expired or failed attempts). Whether the login completed there has not been
+reported back.
+
 ## Part D — open/optional items
 
 Nothing required. Optional polish, either repo:
-- gateway: tag a release (pyproject still 0.1.0, no tags); optional
+- gateway: tag a release (pyproject 0.1.1, no tags); optional
   `crispy-copilot models --flat` (fold the plugin's flattenModel into the
   gateway) for non-wrapper users
 - toolbox: pluginRoot dedup in marketplace.json (pre-existing nit); a11y
@@ -205,3 +248,10 @@ Nothing required. Optional polish, either repo:
 4. Windows: re-check the five gotchas above before touching spawn/view code.
 5. Verify before pushing: gateway → pytest + smoke.sh; wrapper → imports +
    runtime view smoke + isolated-port lifecycle test. Small verified commits.
+6. Tests: point `CRISPY_GATEWAY_RUNTIME_DIR` (and `CRISPY_GATEWAY_PORT`) at
+   scratch values. On the home box the default runtime dir is meant to stay
+   absent until the plugin is actually installed there.
+7. Deploying to a live plugin dir means copying the changed files — never an
+   `rm` and re-copy — and saying what a destructive command does before
+   running it. Replacing the plugin dir wholesale is what destroyed the
+   plugin's OAuth account here while the store still lived inside it.
