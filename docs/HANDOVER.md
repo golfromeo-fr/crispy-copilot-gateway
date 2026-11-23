@@ -8,7 +8,7 @@ SHAs and versions — re-verify anything that looks stale.
 - Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway`, last code commit
   `1562113` (0.1.1); docs-only commits after it
 - Wrapper plugin: `golfromeo-fr/zcode-toolbox`, `plugins/copilot-gateway`
-  v0.2.4 @ `d1442fc` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
+  v0.2.5 @ `2f15db4` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
 ## Part A — the gateway (this repo)
@@ -154,8 +154,10 @@ The address to enter the code is whatever GitHub returns with it
 observed on 2026-11-23 and shown in GitHub's docs, which is an observation, not
 a guarantee, and there is no pre-filled link in the response. The plugin does
 not assume it: the view shows only the address that came with the code, and
-nothing opens a guessed address. The device flow does not care which machine
-the browser is on. When `openedInBrowser` is false or the clipboard is not
+nothing opens a guessed address. The login card shows the link and the code
+as text as soon as a login is started, whatever the opener reported, because
+an opener can exit cleanly without anything appearing. The device flow does
+not care which machine the browser is on. When `openedInBrowser` is false or the clipboard is not
 shared, type the address shown in the view by hand in any browser signed in to
 that GitHub account (phone, host, another computer) and type the code. Codes
 expire after ~15 minutes:
@@ -212,7 +214,8 @@ Plugin releases since 0.2.0: 0.2.1 sticky copy bar (its sticky button had no
 click handler until 0.2.3); **0.2.2 was never published as a version** (the
 idle-exit code is in toolbox `91a5d4a`, but the bump was skipped, see above);
 0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code);
-0.2.4 (the plugin no longer assumes the device address).
+0.2.4 (the plugin no longer assumes the device address); 0.2.5 (login card:
+the link is always the fallback when no browser opens).
 
 **Home Linux box** (re-verified 2026-11-23): standalone gateway serving
 `:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
@@ -231,11 +234,12 @@ updating to 0.2.0 the migration should preserve the account.
 
 **Work Linux box** (2026-11-23): ZCode with the plugin under test. The user
 could not open the GitHub link from that session and could not copy the view
-text out. My advice to type `github.com/login/device` by hand in another
-browser was rejected as wrong the same day; the cause was not established when
-this was written. Plugin 0.2.3/0.2.4 show the address and code as typeable
-text (only the address GitHub returned with the code) and explain expired or
-failed attempts.
+text out. What they needed was for the extension itself to show the link when
+no browser opens (stated 2026-11-23), not advice to type an address by hand.
+The login card has shown the link and the code as text since plugin 0.2.3
+(only the link GitHub returned with the code) and makes the link the explicit
+fallback in 0.2.5; it also explains expired or failed attempts. Not yet
+confirmed on that machine.
 
 ## Part D — open/optional items
 
