@@ -164,13 +164,15 @@ create/revoke for catalog reads, planted-legacy-store migration test.
 
 ## Part C — machine states (as of 2026-11-23)
 
-**Home Linux box**: standalone gateway serving `:8812` from
-`~/crispy-copilot-gateway` with the shared store (accounts + keys + credit
-history intact — plugin work never touched it). The plugin is deployed at
-`~/.zcode/plugins/copilot-gateway` but NOT installed in that ZCode instance;
-its runtime dir `~/.zcode/plugin-data/copilot-gateway` has an install + a
-`zcode` key but **no connected account** (the pre-0.2.0 account was wiped by
-the deploy bug; needs a fresh `login` if ever used here).
+**Home Linux box** (re-verified 2026-11-23): standalone gateway serving
+`:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
+keys + credit history intact — plugin work never touched it; 130 unit tests
+pass). The plugin is deployed at `~/.zcode/plugins/copilot-gateway`
+(0.2.0-era code: `plugin-data` runtime default + migration present) but NOT
+installed in that ZCode instance. The runtime dir
+`~/.zcode/plugin-data/copilot-gateway` is **absent**, and no legacy in-plugin
+store remains — earlier "install + `zcode` key, no account" state is gone.
+First `gateway_start` here = fresh clone + venv + `login` from scratch.
 
 **Windows 11 VM**: full working setup — plugin installed, gateway installed
 via the wrapper, account connected (device flow), credits metering observed
