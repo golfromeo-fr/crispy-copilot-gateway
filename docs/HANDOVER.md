@@ -41,9 +41,11 @@ Default store: `~/.local/share/crispy-copilot-gateway/` (override:
 
 **Store modes in the wild** (important when debugging):
 1. standalone checkout (this repo, `./start.sh`) → default shared store
-2. ZCode wrapper plugin → own store at `<plugin data dir>/store/`
-   (`~/.zcode/plugins/copilot-gateway/store` on Linux, equivalent on Windows) —
-   isolated on purpose, so wrapper installs never touch mode-1 data.
+2. ZCode wrapper plugin → own store at `~/.zcode/plugin-data/copilot-gateway/store/`
+   (`CRISPY_GATEWAY_RUNTIME_DIR` override) — isolated on purpose, so wrapper
+   installs never touch mode-1 data. Since plugin 0.2.0 this lives OUTSIDE the
+   plugin dir (plugin updates replace the plugin dir and must not wipe the
+   account; pre-0.2.0 installs migrate automatically on first status/start).
 
 ## The ZCode wrapper plugin (separate repo)
 
