@@ -8,7 +8,7 @@ SHAs and versions — re-verify anything that looks stale.
 - Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway`, last code commit
   `1562113` (0.1.1); docs-only commits after it
 - Wrapper plugin: `golfromeo-fr/zcode-toolbox`, `plugins/copilot-gateway`
-  v0.2.5 @ `2f15db4` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
+  v0.2.6 @ `fab9530` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
 ## Part A — the gateway (this repo)
@@ -144,8 +144,14 @@ Pending logins, Proxy keys (pin select + revoke), Copilot credits (totals +
 recent), Harness config (**config…** regenerate for existing key ·
 **new key…** first-time · **copy** to clipboard), update…. The `updated`
 line shows the bound bridge global (`· bridge zcode|host`) for debugging.
-Links do not open from inside the view, and the bridge's own link call
-swallows its errors, so nothing in the view relies on either.
+Plain links cannot leave a plugin view: the app allows navigation only to
+its own origins and denies new windows (read in the app bundle's main
+process, 2026-11-23). The login link (card and Pending logins row, plugin
+0.2.6) is therefore opened through the view bridge's
+`openExternal({href})`, which the app hands to its standard open-URL path and
+so to the system browser. That call never reports failure to the page (the
+app only logs it), so the link also stays on screen as text and the message
+keeps "type it" as the fallback.
 
 ### Login when no browser opens here (VMs, remote desktops)
 
@@ -156,7 +162,12 @@ a guarantee, and there is no pre-filled link in the response. The plugin does
 not assume it: the view shows only the address that came with the code, and
 nothing opens a guessed address. The login card shows the link and the code
 as text as soon as a login is started, whatever the opener reported, because
-an opener can exit cleanly without anything appearing. The device flow does
+an opener can exit cleanly without anything appearing. Clicking the link asks
+the app to open it in the system browser (plugin 0.2.6). On a machine where
+the OS has no browser registered, no plugin-side route can open the page (the
+plugin's own launch at login time and the app's open-URL call both end at the
+system browser): there the link has to be carried to a browser elsewhere by
+hand or clipboard. The device flow does
 not care which machine the browser is on. When `openedInBrowser` is false or the clipboard is not
 shared, type the address shown in the view by hand in any browser signed in to
 that GitHub account (phone, host, another computer) and type the code. Codes
@@ -215,7 +226,8 @@ click handler until 0.2.3); **0.2.2 was never published as a version** (the
 idle-exit code is in toolbox `91a5d4a`, but the bump was skipped, see above);
 0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code);
 0.2.4 (the plugin no longer assumes the device address); 0.2.5 (login card:
-the link is always the fallback when no browser opens).
+the link is always the fallback when no browser opens); 0.2.6 (the link is
+clickable again, opened through the app's open-URL call).
 
 **Home Linux box** (re-verified 2026-11-23): standalone gateway serving
 `:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
@@ -238,8 +250,12 @@ text out. What they needed was for the extension itself to show the link when
 no browser opens (stated 2026-11-23), not advice to type an address by hand.
 The login card has shown the link and the code as text since plugin 0.2.3
 (only the link GitHub returned with the code) and makes the link the explicit
-fallback in 0.2.5; it also explains expired or failed attempts. Not yet
-confirmed on that machine.
+fallback in 0.2.5; it also explains expired or failed attempts. The same day
+the user asked to revert to "the link that was working on a previous test":
+that was a plain link, which cannot open from a plugin view; what opened a
+browser in the Windows test was the plugin's launch at login time. 0.2.6
+makes the link clickable through the app's open-URL call. Not yet confirmed
+on that machine, nor whether it has a browser registered at all.
 
 ## Part D — open/optional items
 
