@@ -21,3 +21,4 @@ usage.db
 *.sqlite
 *.sqlite3
 *.tmp
+.v2c/
