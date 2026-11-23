@@ -88,7 +88,10 @@ server), `view.html`, `skills/setup/SKILL.md`, manifest
 
 On first `gateway_start`: clones THIS repo from GitHub into
 `<runtimeDir>/gateway`, detects python ≥ 3.12, creates the venv, pip-installs
-(~20s), spawns `serve` on the configured host:port. `gateway_update`:
+(~20s), spawns `serve` on the configured host:port with `--idle-exit 30`
+(default; `idle_exit` userConfig, 0 = keep running). While ZCode runs the chip's
+5s /healthz poll keeps the gateway alive, so a forgotten gateway exits gracefully
+~30 min after ZCode closes (needs gateway >= 0.1.1 / 1562113). `gateway_update`:
 fetch → count behind → `reset --hard origin/main` → pip → restart if running
 (manual `git pull`, wrapped). All git access is **anonymous + hermetic**
 (empty-file git config, `GIT_TERMINAL_PROMPT=0`, no user/system gitconfig, no
