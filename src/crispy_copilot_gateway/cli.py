@@ -15,10 +15,11 @@ def serve(host: str = typer.Option(config.DEFAULT_HOST, "--host"),
               help="minutes without any request before a graceful shutdown (0 = never)")) -> None:
     import uvicorn
     from .proxy import build_app
-    server = uvicorn.Server(uvicorn.Config(build_app(), host=host, port=port))
+    app = build_app()
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
     if idle_exit > 0:
         from .idle import arm_idle_exit
-        arm_idle_exit(server, idle_exit * 60.0)
+        arm_idle_exit(server, idle_exit * 60.0, app)
     server.run()
 
 @app.command()
