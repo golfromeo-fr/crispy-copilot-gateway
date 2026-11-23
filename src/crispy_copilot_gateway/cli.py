@@ -9,10 +9,17 @@ app = typer.Typer(no_args_is_help=True)
 
 @app.command()
 def serve(host: str = typer.Option(config.DEFAULT_HOST, "--host"),
-          port: int = typer.Option(config.DEFAULT_PORT, "--port")) -> None:
+          port: int = typer.Option(config.DEFAULT_PORT, "--port"),
+          idle_exit: float = typer.Option(
+              0.0, "--idle-exit",
+              help="minutes without any request before a graceful shutdown (0 = never)")) -> None:
     import uvicorn
     from .proxy import build_app
-    uvicorn.run(build_app(), host=host, port=port)
+    server = uvicorn.Server(uvicorn.Config(build_app(), host=host, port=port))
+    if idle_exit > 0:
+        from .idle import arm_idle_exit
+        arm_idle_exit(server, idle_exit * 60.0)
+    server.run()
 
 @app.command()
 def login(label: str) -> None:
