@@ -11,6 +11,10 @@ SHAs and versions — re-verify anything that looks stale.
   v0.2.7 @ `e8e318f` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
+> **Open incident (2026-11-24), required fix pending:** an install cloned before
+> gateway `554f8e5` cannot be started by plugin 0.2.3 or later. Workaround:
+> `gateway_update`, then `gateway_start`. Details under "Open incident" below.
+
 ## Part A — the gateway (this repo)
 
 Local API gateway for GitHub Copilot. Serves on `127.0.0.1:8812` (default):
@@ -113,6 +117,9 @@ runtime data.
 touched by update), `host`, `port`, `gateway_repo` (fork), `git_path`
 (non-standard git location). Passed to the MCP server as `CRISPY_GATEWAY_*`
 env. The gateway additionally respects `CRISPY_COPILOT_DATA_DIR`.
+Caveat (2026-11-24, read from the code, not executed): `gateway_update` runs
+`fetch` and `reset --hard` on `gateway_path` as well, so the "never touched" claim
+does not hold yet. Do not point it at a checkout with uncommitted work.
 
 ### MCP tools (13) — `mcp__plugin_copilot-gateway_gateway__<name>`
 
@@ -244,10 +251,18 @@ installed in that ZCode instance; test machines update from GitHub. The runtime 
 store remains — earlier "install + `zcode` key, no account" state is gone.
 First `gateway_start` here = fresh clone + venv + `login` from scratch.
 
-**Windows 11 VM**: full working setup — plugin installed, gateway installed
-via the wrapper, account connected (device flow), credits metering observed
-(6 req), ZCode wired by pasting the provider JSON into a chat. After
-updating to 0.2.0 the migration should preserve the account.
+**Windows 11 machine** (observed there 2026-11-24, plugin 0.2.7): live in use.
+Plugin 0.2.0 installed on 2026-11-23 with a clone of `a54bcf1`; plugin 0.2.7 on
+2026-11-24 then failed to start it (see "Open incident"); `gateway_update` +
+`gateway_start` at 05:09 to 05:11 left the clone at `bd999d7` and the gateway
+healthy on `:8812`. Store intact: one account, one key `zcode`, metering
+history. Sessions on that machine: treat it as live, test on a scratch runtime
+dir and a free port, and do not call `gateway_stop` or `gateway_update` against
+the default instance. Toolchain in a plain shell: Git for Windows, python.org
+Python 3.13, and no `node` on PATH (the plugin's own JS runs as the app binary
+itself). Pre-0.2.0 leftovers (an old clone, an old store with a copy of the
+account token, logs) remain under the plugin dir there and were left alone. No
+clone of zcode-toolbox exists there; its marketplace snapshot is app-managed.
 
 **Work Linux box** (2026-11-23): ZCode with the plugin under test. The user
 could not open the GitHub link from that session and could not copy the view
@@ -260,11 +275,85 @@ the user asked to revert to "the link that was working on a previous test":
 that was a plain link, which cannot open from a plugin view; what opened a
 browser in the Windows test was the plugin's launch at login time. 0.2.6
 makes the link clickable through the app's open-URL call. Not yet confirmed
-on that machine, nor whether it has a browser registered at all.
+on that machine, nor whether it has a browser registered at all. Its gateway
+clone commit is not verified either (it matters for the incident below).
+
+## Open incident (2026-11-24): an old install cannot be started by a new wrapper
+
+**Symptom.** On an instance whose gateway clone predates gateway `554f8e5`
+(2026-11-23 04:45), `gateway_start` fails from plugin 0.2.3 on with "gateway did
+not come up within 20s". `serve.log` ends with `No such option: --idle-exit`: the
+wrapper passes that option whenever `idle_exit` is above 0, and the old `serve`
+only knows `--host` and `--port`.
+
+**Workaround, no code:** `gateway_update` (or the view's update…), then
+`gateway_start`.
+
+**Why (read from the 0.2.7 code, behaviour seen on the Windows machine).**
+`ensureInstall` returns as soon as the venv CLI exists, so an existing clone is
+never re-checked; only `gateway_update` runs git, and only when called. The
+plugin does not watch the process it spawned, waits the full 20 s, and returns
+only a log path. Part B's "needs gateway >= 0.1.1" was documentation, not code.
+Every test began from a fresh clone, so "old clone, new wrapper" was never
+exercised. The gateway is right to refuse an unknown option; leave that alone.
+
+**Scope.** Any instance whose clone predates `554f8e5`, until `gateway_update`
+is run. Known: the Windows machine (healed). The work Linux box and any other
+instance are not verified.
+
+**Required fix (plugin 0.2.8), wrapper only.**
+1. Before spawning an existing install, probe `<cli> serve --help` for every
+   option the wrapper is about to pass. Match the option names only: the output
+   is box-drawn.
+2. Missing option on the managed install: update the tree (git, then pip: the
+   CLI runs the copy in site-packages, not the git tree), re-probe, then start,
+   and say what it updated from and to. Share that step with `gateway_update`.
+3. If the update cannot run (offline, git failure): start without the optional
+   option and say so in the result. For a non-optional option (none today), fail.
+4. An external `gateway_path` checkout is never written to: start without the
+   optional option when that is safe, otherwise return an error naming the path,
+   its commit, the missing option and the commit that adds it.
+5. Fail fast: if the gateway exits before `/healthz` answers, return its own
+   error at once. `serve.log` grows without bound (about two lines per 5 s while
+   a view or chip polls), so read only what was written since the spawn and
+   leave out the `/healthz` lines.
+6. `gatewayStatus` says whether the installed gateway satisfies this wrapper.
+7. One install or update at a time across processes: the view tools run in the
+   extension host and the MCP tools in a separate process, and `installPromise`
+   is per-process. Use a lock in the runtime dir.
+
+Default decision unless the author says otherwise: probe, heal, then start,
+falling back to a reported degraded start. Do not vendor a gateway copy, make
+the gateway tolerate unknown options, or fetch on every start.
+
+**Also found with it.**
+- `gateway_update` counts the commits behind with a plain `git`, outside the
+  hermetic path and without the resolved binary. If that fails, the result reads
+  "already on latest". And it resets `gateway_path` too (see the userConfig
+  caveat in Part B). Both read from the code, not executed.
+- Stop safety on Windows (observed there while the gateway was up): `serve.pid`
+  holds the launcher and the port is owned by its grandchild (three processes);
+  the file is removed only by `gatewayStop`, so an idle exit or a failed start
+  leaves it behind; `gatewayStop` signals whatever PID it names. Not verified
+  what `process.kill()` terminates for that chain: check it on Windows before
+  redesigning stop. Never signal a PID that is not verified to be this plugin's
+  gateway, and do not leave a stale file behind. If `/healthz` gains fields for
+  this, the wrapper must treat them as optional, or this incident repeats.
+
+**Tests to add** (toolbox `tools/`, run with node, each on a scratch
+`CRISPY_GATEWAY_RUNTIME_DIR` and a free port; ad-hoc tests so far used :8813 to
+:8828): the real upgrade path (reset a scratch clone to `a54bcf1`, pip-install
+it, start with the fixed wrapper); the decision logic with a fake CLI whose
+`serve --help` omits an option; a CLI that exits at once; a stale PID naming a
+harmless process; a behind-count that cannot run; the view's outdated-install
+state.
+
+**Release.** Plugin 0.2.8 through `release-plugin.sh`, which first copies from
+the live install dir: make sure that copy is current before running it.
 
 ## Part D — open/optional items
 
-Nothing required. Optional polish, either repo:
+Required and pending: the stale-install fix above. Older optional polish:
 - gateway: tag a release (pyproject 0.1.1, no tags); optional
   `crispy-copilot models --flat` (fold the plugin's flattenModel into the
   gateway) for non-wrapper users
