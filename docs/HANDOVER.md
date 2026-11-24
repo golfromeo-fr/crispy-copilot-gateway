@@ -124,13 +124,14 @@ Caveat (2026-11-24, read from the code, not executed): `gateway_update` runs
 `fetch` and `reset --hard` on `gateway_path` as well, so the "never touched" claim
 does not hold yet. Do not point it at a checkout with uncommitted work.
 
-### MCP tools (13) — `mcp__plugin_copilot-gateway_gateway__<name>`
+### MCP tools (14) — `mcp__plugin_copilot-gateway_gateway__<name>`
 
 status · start · stop · update · login / login_check (device flow:
 `gateway_login {label}` returns code+url and `openedInBrowser`, true only
 when an opener really launched a browser; `login_check` phases:
 `awaiting-authorization` pending · `connected` · `expired` (codes live ~15
-min: start again) · `failed` (see `logTail`)) · keys · key_create / key_revoke / key_pin ·
+min: start again) · `failed` (see `logTail`); `login_dismiss {label}` removes a dead attempt and
+stops its poller when verifiably ours)) · keys · key_create / key_revoke / key_pin ·
 **config** (provider config for an EXISTING key; apiKey = placeholder; reads
 the catalog via a throwaway `<key>-catalog-tmp` key, revoked immediately;
 stale temp keys cleaned) · **use** (first-time: create key, raw shown ONCE) ·
