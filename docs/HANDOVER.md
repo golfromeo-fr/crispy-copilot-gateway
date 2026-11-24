@@ -8,7 +8,7 @@ SHAs and versions — re-verify anything that looks stale.
 - Gateway (this repo): `golfromeo-fr/crispy-copilot-gateway`, last code commit
   `1562113` (0.1.1); docs-only commits after it
 - Wrapper plugin: `golfromeo-fr/zcode-toolbox`, `plugins/copilot-gateway`
-  v0.2.6 @ `fab9530` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
+  v0.2.7 @ `e8e318f` (marketplace: `golfromeo-zcode-toolbox`; sibling plugins
   context-lens 1.6.2, token-speed 1.2.1)
 
 ## Part A — the gateway (this repo)
@@ -167,7 +167,11 @@ the app to open it in the system browser (plugin 0.2.6). On a machine where
 the OS has no browser registered, no plugin-side route can open the page (the
 plugin's own launch at login time and the app's open-URL call both end at the
 system browser): there the link has to be carried to a browser elsewhere by
-hand or clipboard. The device flow does
+hand or clipboard. When no browser opened, the card also shows the terminal
+command for that machine with the link (plugin 0.2.7): `xdg-open` on Linux,
+`open` on macOS, `start` on Windows — the status and login results carry the
+gateway's `platform`. Run in a terminal, it opens the page when a browser is
+installed and prints the reason when none is. The device flow does
 not care which machine the browser is on. When `openedInBrowser` is false or the clipboard is not
 shared, type the address shown in the view by hand in any browser signed in to
 that GitHub account (phone, host, another computer) and type the code. Codes
@@ -227,7 +231,8 @@ idle-exit code is in toolbox `91a5d4a`, but the bump was skipped, see above);
 0.2.3 (login without a browser or clipboard, copy feedback, idle-exit code);
 0.2.4 (the plugin no longer assumes the device address); 0.2.5 (login card:
 the link is always the fallback when no browser opens); 0.2.6 (the link is
-clickable again, opened through the app's open-URL call).
+clickable again, opened through the app's open-URL call); 0.2.7 (the card
+shows the terminal command for the machine when no browser opened).
 
 **Home Linux box** (re-verified 2026-11-23): standalone gateway serving
 `:8812` from `~/crispy-copilot-gateway` with the shared store (accounts +
