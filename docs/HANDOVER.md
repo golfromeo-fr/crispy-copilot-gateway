@@ -97,7 +97,10 @@ On first `gateway_start`: clones THIS repo from GitHub into
 (~20s), spawns `serve` on the configured host:port with `--idle-exit 30`
 (default; `idle_exit` userConfig, 0 = keep running). While ZCode runs the chip's
 5s /healthz poll keeps the gateway alive, so a forgotten gateway exits gracefully
-~30 min after ZCode closes (needs gateway >= 0.1.1 / 1562113). `gateway_update`:
+~30 min after ZCode closes. The wrapper enforces that requirement since plugin
+0.2.8: `gateway_start` probes the installed gateway and brings a plugin-managed
+install up to date first (or starts without the newer feature, and the result
+says so). `gateway_update`:
 fetch → count behind → `reset --hard origin/main` → pip → restart if running
 (manual `git pull`, wrapped). All git access is **anonymous + hermetic**
 (empty-file git config, `GIT_TERMINAL_PROMPT=0`, no user/system gitconfig, no
@@ -278,7 +281,7 @@ makes the link clickable through the app's open-URL call. Not yet confirmed
 on that machine, nor whether it has a browser registered at all. Its gateway
 clone commit is not verified either (it matters for the incident below).
 
-## Open incident (2026-11-24): an old install cannot be started by a new wrapper
+## Open incident (2026-11-24) — RESOLVED in plugin 0.2.8: an old install cannot be started by a new wrapper
 
 **Symptom.** On an instance whose gateway clone predates gateway `554f8e5`
 (2026-11-23 04:45), `gateway_start` fails from plugin 0.2.3 on with "gateway did
@@ -287,7 +290,8 @@ wrapper passes that option whenever `idle_exit` is above 0, and the old `serve`
 only knows `--host` and `--port`.
 
 **Workaround, no code:** `gateway_update` (or the view's update…), then
-`gateway_start`.
+`gateway_start`. Fixed for good in plugin 0.2.8 (below): start itself heals the
+install.
 
 **Why (read from the 0.2.7 code, behaviour seen on the Windows machine).**
 `ensureInstall` returns as soon as the venv CLI exists, so an existing clone is
@@ -301,7 +305,21 @@ exercised. The gateway is right to refuse an unknown option; leave that alone.
 is run. Known: the Windows machine (healed). The work Linux box and any other
 instance are not verified.
 
-**Required fix (plugin 0.2.8), wrapper only.**
+**Required fix, shipped in plugin 0.2.8.** The implementation: the extension
+declares what it needs at the top of `impl/gateway.js` (`GATEWAY_MIN_VERSION`
+plus a `SERVE_OPTIONS` table, one entry per option with the gateway version
+that introduced it). `gateway_start` reads the version installed in the venv
+(the git tree alone lies when a pip step failed), updates a plugin-managed
+install first when an option in use is missing, starts without an option it
+cannot get and says so, refuses outright only below the minimum, returns the
+gateway's own error at once when it exits during startup, reads log tails
+without the /healthz noise, serialises install/update/start across processes
+with a lock in the runtime dir, and makes `gateway_update` refuse an external
+checkout (with the command to run there) and treat a failed behind-count as an
+error. Stop verifies the pid against the process command line and signals only
+its own gateway. Tests: toolbox `tools/test-gateway-lifecycle.mjs` (16
+hermetic scenarios with a stand-in gateway; `REAL=1` replays this incident
+against the real repo) and the view smoke.
 1. Before spawning an existing install, probe `<cli> serve --help` for every
    option the wrapper is about to pass. Match the option names only: the output
    is box-drawn.
@@ -353,7 +371,7 @@ the live install dir: make sure that copy is current before running it.
 
 ## Part D — open/optional items
 
-Required and pending: the stale-install fix above. Older optional polish:
+Shipped: the stale-install fix (plugin 0.2.8). Older optional polish:
 - gateway: tag a release (pyproject 0.1.1, no tags); optional
   `crispy-copilot models --flat` (fold the plugin's flattenModel into the
   gateway) for non-wrapper users
